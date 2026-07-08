@@ -174,7 +174,8 @@ const suppressionTypes = new Set([
 ]);
 const suppressionDiagnosticsWarning =
   "Could not read contact_suppression_rules diagnostics.";
-const contactLookupChunkSize = 100;
+const contactLookupChunkSize = 50;
+const scheduleContactLookupChunkSize = 50;
 const maxDueEnrollmentsPerCampaign = 250;
 
 export function createEmptyDailySendPlan(
@@ -1091,7 +1092,7 @@ function getDefaultCampaignStep(stepNumber: number): DefaultCampaignStep {
       delay_days: 0,
       subject_template: "Quick introduction",
       body_template:
-        "Hi {first_name},\n\nI just wanted to introduce myself. We help real estate agents with listing photography, video, drone, and marketing content.\n\nIf you ever need help with an upcoming listing, I'd be happy to help.\n\nBest,\nMike",
+        "Hi {first_name},\n\nI just wanted to introduce myself. We help real estate agents with listing photography, video, drone, and marketing content.\n\nIf you ever need help with an upcoming listing, I'd be happy to help.\n\nBest,\nTJ Muldoon",
       status: "active",
     };
   }
@@ -1102,7 +1103,7 @@ function getDefaultCampaignStep(stepNumber: number): DefaultCampaignStep {
       delay_days: 14,
       subject_template: "Just checking in",
       body_template:
-        "Hi {first_name},\n\nJust checking back in to see if you have any upcoming listings or marketing needs.\n\nWe can help with photography, video, drone, and listing media when something comes up.\n\nBest,\nMike",
+        "Hi {first_name},\n\nJust checking back in to see if you have any upcoming listings or marketing needs.\n\nWe can help with photography, video, drone, and listing media when something comes up.\n\nBest,\nTJ Muldoon",
       status: "active",
     };
   }
@@ -1112,7 +1113,7 @@ function getDefaultCampaignStep(stepNumber: number): DefaultCampaignStep {
     delay_days: 30,
     subject_template: "Should I close the loop?",
     body_template:
-      "Hi {first_name},\n\nI didn't want to keep bothering you, so I'll make this my last quick follow-up.\n\nIf you ever need listing photography, video, drone, or marketing support, I'd be happy to help.\n\nBest,\nMike",
+      "Hi {first_name},\n\nI didn't want to keep bothering you, so I'll make this my last quick follow-up.\n\nIf you ever need listing photography, video, drone, or marketing support, I'd be happy to help.\n\nBest,\nTJ Muldoon",
     status: "active",
   };
 }
@@ -1559,23 +1560,8 @@ async function enrichDailySendScheduleRows(
   const campaignIds = Array.from(new Set(rows.map((row) => row.campaign_id)));
   const stepIds = Array.from(new Set(rows.map((row) => row.campaign_step_id)));
 
-  const [{ data: contacts, error: contactsError }, { data: campaigns, error: campaignsError }, { data: steps, error: stepsError }] =
+  const [{ data: campaigns, error: campaignsError }, { data: steps, error: stepsError }] =
     await Promise.all([
-      runScheduleQuery("daily_send_schedule.load_contacts", () =>
-        supabaseAdmin
-          .from("hubspot_contacts")
-          .select("id,first_name,last_name,company,email")
-          .in("id", contactIds)
-          .returns<
-            Array<{
-              id: string;
-              first_name: string | null;
-              last_name: string | null;
-              company: string | null;
-              email: string | null;
-            }>
-          >(),
-      ),
       runScheduleQuery("daily_send_schedule.load_campaigns", () =>
         supabaseAdmin
           .from("campaigns")
@@ -1591,14 +1577,6 @@ async function enrichDailySendScheduleRows(
           .returns<Array<{ id: string; step_number: number }>>(),
       ),
     ]);
-
-  if (contactsError) {
-    throw createCampaignScheduleOperationError(
-      "Daily send schedule contact load failed",
-      "daily_send_schedule.load_contacts",
-      contactsError,
-    );
-  }
 
   if (campaignsError) {
     throw createCampaignScheduleOperationError(
@@ -1616,7 +1594,8 @@ async function enrichDailySendScheduleRows(
     );
   }
 
-  const contactsById = new Map((contacts ?? []).map((contact) => [contact.id, contact]));
+  const contacts = await loadDailyScheduleContacts(contactIds);
+  const contactsById = new Map(contacts.map((contact) => [contact.id, contact]));
   const campaignsById = new Map(
     (campaigns ?? []).map((campaign) => [campaign.id, campaign]),
   );
@@ -1632,6 +1611,80 @@ async function enrichDailySendScheduleRows(
       ? { step_number: stepsById.get(row.campaign_step_id)!.step_number }
       : null,
   }));
+}
+
+async function loadDailyScheduleContacts(contactIds: string[]) {
+  if (contactIds.length === 0) {
+    return [];
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+  const contacts: Array<{
+    id: string;
+    hubspot_contact_id: string | null;
+    first_name: string | null;
+    last_name: string | null;
+    company: string | null;
+    email: string | null;
+    is_unsubscribed: boolean | null;
+  }> = [];
+  const contactIdChunks = chunkArray(contactIds, scheduleContactLookupChunkSize);
+
+  logScheduleOperationStart("daily_send_schedule.load_contacts", {
+    contactCount: contactIds.length,
+    chunkCount: contactIdChunks.length,
+    chunkSize: scheduleContactLookupChunkSize,
+  });
+
+  for (let chunkIndex = 0; chunkIndex < contactIdChunks.length; chunkIndex += 1) {
+    const contactIdChunk = contactIdChunks[chunkIndex];
+
+    logScheduleOperationStart("daily_send_schedule.load_contacts.chunk", {
+      chunkNumber: chunkIndex + 1,
+      chunkCount: contactIdChunks.length,
+      chunkSize: contactIdChunk.length,
+    });
+
+    const { data, error } = await runScheduleQuery(
+      "daily_send_schedule.load_contacts",
+      () =>
+        supabaseAdmin
+          .from("hubspot_contacts")
+          .select("id,hubspot_contact_id,email,first_name,last_name,company,is_unsubscribed")
+          .in("id", contactIdChunk)
+          .returns<
+            Array<{
+              id: string;
+              hubspot_contact_id: string | null;
+              first_name: string | null;
+              last_name: string | null;
+              company: string | null;
+              email: string | null;
+              is_unsubscribed: boolean | null;
+            }>
+          >(),
+    );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        `Daily send schedule contact load failed in chunk ${chunkIndex + 1}.`,
+        "daily_send_schedule.load_contacts",
+        error,
+      );
+    }
+
+    contacts.push(...(data ?? []));
+    logScheduleOperationSuccess("daily_send_schedule.load_contacts.chunk", {
+      chunkNumber: chunkIndex + 1,
+      rowCount: data?.length ?? 0,
+    });
+  }
+
+  logScheduleOperationSuccess("daily_send_schedule.load_contacts", {
+    contactCount: contacts.length,
+  });
+
+  return contacts;
 }
 
 async function getDueEnrollments(

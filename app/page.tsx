@@ -143,6 +143,47 @@ type CampaignStep = {
   status: string;
 };
 
+type EmailDraftStatus = "draft" | "approved" | "skipped";
+
+type EmailDraft = {
+  id: string;
+  schedule_id: string;
+  hubspot_contact_id: string | null;
+  contact_email: string;
+  contact_first_name: string | null;
+  contact_last_name: string | null;
+  contact_company: string | null;
+  campaign_id: string | null;
+  campaign_step_id: string | null;
+  step_number: number | null;
+  subject: string;
+  body: string;
+  status: EmailDraftStatus;
+  approved_at: string | null;
+  skipped_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type EmailDraftSummary = {
+  created: number;
+  existing: number;
+  skipped: number;
+  totalDrafts: number;
+  approved: number;
+  skippedDrafts: number;
+  remaining: number;
+};
+
+type EmailDraftResponse = {
+  ok: boolean;
+  summary: EmailDraftSummary;
+  drafts: EmailDraft[];
+  message?: string;
+  error?: string;
+  details?: string;
+};
+
 type EmailTemplate = {
   id: string;
   campaign_id: string | null;
@@ -187,6 +228,11 @@ type TemplateForm = {
 type CampaignStepForm = {
   subject_template: string;
   body_template: string;
+};
+
+type EmailDraftForm = {
+  subject: string;
+  body: string;
 };
 
 type ClientInsert = {
@@ -280,6 +326,16 @@ const emptyDailySendPlan: DailySendPlan = {
   schedule: [],
 };
 
+const emptyEmailDraftSummary: EmailDraftSummary = {
+  created: 0,
+  existing: 0,
+  skipped: 0,
+  totalDrafts: 0,
+  approved: 0,
+  skippedDrafts: 0,
+  remaining: 0,
+};
+
 const campaignStatuses = [
   { label: "Draft", value: "draft" },
   { label: "Active", value: "active" },
@@ -313,10 +369,28 @@ function normalizeCsvHeader(header: string) {
 
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) {
+    if (isHeadersOverflowMessage(error.message)) {
+      return "Today's send plan could not load because the contact lookup was too large. Please try again after the query fix.";
+    }
+
     return error.message;
   }
 
+  if (typeof error === "string" && isHeadersOverflowMessage(error)) {
+    return "Today's send plan could not load because the contact lookup was too large. Please try again after the query fix.";
+  }
+
   return fallback;
+}
+
+function isHeadersOverflowMessage(message: string) {
+  const normalizedMessage = message.toLowerCase();
+
+  return (
+    normalizedMessage.includes("headers overflow") ||
+    normalizedMessage.includes("request url is") ||
+    normalizedMessage.includes("url is") && normalizedMessage.includes("characters")
+  );
 }
 
 function reportError(label: string, error: unknown) {
@@ -574,6 +648,39 @@ function getCampaignPrimaryAction(status: string) {
   return "Continue";
 }
 
+function getDraftContactName(draft: EmailDraft) {
+  const fullName = [draft.contact_first_name, draft.contact_last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  return fullName || draft.contact_email;
+}
+
+function getDraftStatusLabel(status: EmailDraftStatus) {
+  if (status === "approved") {
+    return "Approved draft";
+  }
+
+  if (status === "skipped") {
+    return "Skipped";
+  }
+
+  return "Prepared for review";
+}
+
+function getDraftStatusClasses(status: EmailDraftStatus) {
+  if (status === "approved") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+
+  if (status === "skipped") {
+    return "border-slate-200 bg-slate-100 text-slate-600";
+  }
+
+  return "border-cyan-200 bg-cyan-50 text-cyan-800";
+}
+
 function parseCsv(text: string) {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -697,6 +804,9 @@ export default function Dashboard() {
   >([]);
   const [dailySendPlan, setDailySendPlan] =
     useState<DailySendPlan>(emptyDailySendPlan);
+  const [dailyDrafts, setDailyDrafts] = useState<EmailDraft[]>([]);
+  const [emailDraftSummary, setEmailDraftSummary] =
+    useState<EmailDraftSummary>(emptyEmailDraftSummary);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignSteps, setCampaignSteps] = useState<CampaignStep[]>([]);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([]);
@@ -717,6 +827,7 @@ export default function Dashboard() {
   const [isImporting, setIsImporting] = useState(false);
   const [isSyncingHubSpot, setIsSyncingHubSpot] = useState(false);
   const [isGeneratingSchedule, setIsGeneratingSchedule] = useState(false);
+  const [isGeneratingDrafts, setIsGeneratingDrafts] = useState(false);
   const [isCreatingStarterCampaign, setIsCreatingStarterCampaign] =
     useState(false);
   const [isEnrollingContacts, setIsEnrollingContacts] = useState(false);
@@ -729,6 +840,12 @@ export default function Dashboard() {
     body_template: "",
   });
   const [isSavingCampaignStep, setIsSavingCampaignStep] = useState(false);
+  const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
+  const [emailDraftForm, setEmailDraftForm] = useState<EmailDraftForm>({
+    subject: "",
+    body: "",
+  });
+  const [updatingDraftId, setUpdatingDraftId] = useState<string | null>(null);
   const [importSummary, setImportSummary] =
     useState<ImportSummary>(emptyImportSummary);
   const [openPanel, setOpenPanel] = useState<
@@ -940,11 +1057,17 @@ export default function Dashboard() {
 
   async function loadHubSpotDashboardData() {
     try {
-      const [statusResponse, recommendationsResponse, scheduleResponse] =
+      const [
+        statusResponse,
+        recommendationsResponse,
+        scheduleResponse,
+        draftsResponse,
+      ] =
         await Promise.all([
         fetch("/api/hubspot/status"),
         fetch("/api/hubspot/recommendations"),
         fetch("/api/campaign-schedule"),
+        fetch("/api/email-drafts"),
       ]);
 
       if (statusResponse.ok) {
@@ -970,9 +1093,20 @@ export default function Dashboard() {
 
         setDailySendPlan(scheduleBody);
       }
+
+      if (draftsResponse.ok) {
+        applyEmailDraftResponse(
+          (await draftsResponse.json()) as EmailDraftResponse,
+        );
+      }
     } catch (hubSpotError) {
       reportError("Unable to load HubSpot dashboard data", hubSpotError);
     }
+  }
+
+  function applyEmailDraftResponse(body: EmailDraftResponse) {
+    setDailyDrafts(body.drafts ?? []);
+    setEmailDraftSummary(body.summary ?? emptyEmailDraftSummary);
   }
 
   function handleConnectHubSpot() {
@@ -1048,6 +1182,7 @@ export default function Dashboard() {
       }
 
       setDailySendPlan(body);
+      await loadTodayDrafts();
       setMessage(
         body.summary.totalScheduled > 0
           ? `Today's send plan is ready. ${body.summary.totalScheduled} contacts are scheduled for review.`
@@ -1060,6 +1195,23 @@ export default function Dashboard() {
     }
 
     setIsGeneratingSchedule(false);
+  }
+
+  async function loadTodayDrafts() {
+    const response = await fetch("/api/email-drafts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action: "list_today_drafts" }),
+    });
+    const body = (await response.json()) as EmailDraftResponse;
+
+    if (!response.ok) {
+      throw new Error(body.error || "Unable to load today's drafts.");
+    }
+
+    applyEmailDraftResponse(body);
   }
 
   async function handleCampaignScheduleAction(
@@ -1229,7 +1381,60 @@ export default function Dashboard() {
     let isActive = true;
 
     window.setTimeout(() => {
-      void loadHubSpotDashboardData();
+      void (async () => {
+        try {
+          const [
+            statusResponse,
+            recommendationsResponse,
+            scheduleResponse,
+            draftsResponse,
+          ] = await Promise.all([
+            fetch("/api/hubspot/status"),
+            fetch("/api/hubspot/recommendations"),
+            fetch("/api/campaign-schedule"),
+            fetch("/api/email-drafts"),
+          ]);
+
+          if (!isActive) {
+            return;
+          }
+
+          if (statusResponse.ok) {
+            const statusBody = (await statusResponse.json()) as {
+              connection: HubSpotStatus;
+              health: HubSpotHealth;
+            };
+
+            setHubSpotStatus(statusBody.connection);
+            setHubSpotHealth(statusBody.health);
+          }
+
+          if (recommendationsResponse.ok) {
+            const recommendationsBody =
+              (await recommendationsResponse.json()) as {
+                recommendations: DailyRecommendation[];
+              };
+
+            setDailyRecommendations(recommendationsBody.recommendations);
+          }
+
+          if (scheduleResponse.ok) {
+            const scheduleBody =
+              (await scheduleResponse.json()) as DailySendPlan;
+
+            setDailySendPlan(scheduleBody);
+          }
+
+          if (draftsResponse.ok) {
+            const draftsBody = (await draftsResponse.json()) as EmailDraftResponse;
+
+            setDailyDrafts(draftsBody.drafts ?? []);
+            setEmailDraftSummary(draftsBody.summary ?? emptyEmailDraftSummary);
+          }
+        } catch (hubSpotError) {
+          reportError("Unable to load HubSpot dashboard data", hubSpotError);
+        }
+      })();
     }, 0);
 
     getSupabase()
@@ -1769,11 +1974,110 @@ export default function Dashboard() {
     );
   }
 
-  function handleGenerateDraftsPreview() {
+  async function handleGenerateDraftsPreview() {
     setError("");
-    setMessage(
-      "Draft generation is the next phase. No drafts were generated and nothing was sent.",
-    );
+    setMessage("");
+    setIsGeneratingDrafts(true);
+
+    try {
+      const response = await fetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "generate_today_drafts" }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to generate today's drafts.");
+      }
+
+      applyEmailDraftResponse(body);
+      setMessage(
+        body.message ||
+          `${body.summary.totalDrafts} drafts are prepared for review. Nothing was sent.`,
+      );
+    } catch (draftError) {
+      setError(
+        getErrorMessage(draftError, "Unable to generate today's drafts."),
+      );
+    }
+
+    setIsGeneratingDrafts(false);
+  }
+
+  function handleEditDraft(draft: EmailDraft) {
+    setEditingDraftId(draft.id);
+    setEmailDraftForm({
+      subject: draft.subject,
+      body: draft.body,
+    });
+  }
+
+  async function handleSaveDraft(draftId: string) {
+    setError("");
+    setMessage("");
+    setUpdatingDraftId(draftId);
+
+    try {
+      const response = await fetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "update_draft",
+          draftId,
+          subject: emailDraftForm.subject,
+          body: emailDraftForm.body,
+        }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to save draft.");
+      }
+
+      applyEmailDraftResponse(body);
+      setEditingDraftId(null);
+      setMessage(body.message || "Draft edits saved. Nothing was sent.");
+    } catch (draftError) {
+      setError(getErrorMessage(draftError, "Unable to save draft."));
+    }
+
+    setUpdatingDraftId(null);
+  }
+
+  async function handleDraftStatusAction(
+    draftId: string,
+    action: "approve_draft" | "skip_draft",
+  ) {
+    setError("");
+    setMessage("");
+    setUpdatingDraftId(draftId);
+
+    try {
+      const response = await fetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action, draftId }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to update draft status.");
+      }
+
+      applyEmailDraftResponse(body);
+      setMessage(body.message || "Draft updated. Nothing was sent.");
+    } catch (draftError) {
+      setError(getErrorMessage(draftError, "Unable to update draft status."));
+    }
+
+    setUpdatingDraftId(null);
   }
 
   function scrollToElement(ref: { current: HTMLElement | null }) {
@@ -1851,8 +2155,8 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-[#dfe8f3] text-slate-950">
-      <div className="mx-auto flex w-full max-w-[104rem] flex-col gap-6 p-4 sm:p-6 xl:flex-row xl:p-8">
-        <aside className="flex shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-5 text-white shadow-[0_24px_70px_rgba(7,27,51,0.28)] xl:min-h-[calc(100vh-4rem)] xl:w-72">
+      <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
+        <aside className="flex shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:min-h-[calc(100vh-2.5rem)] lg:w-60">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-xl bg-emerald-400 text-base font-bold text-[#071b33]">
@@ -1868,7 +2172,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <nav className="mt-8 grid gap-2 text-sm font-medium">
+            <nav className="mt-6 grid gap-1.5 text-sm font-medium">
               {[
                 "Home",
                 "Today's Send Plan",
@@ -1877,7 +2181,7 @@ export default function Dashboard() {
                 "Settings",
               ].map((item, index) => (
                 <button
-                  className={`rounded-xl px-3 py-2.5 text-left transition ${
+                  className={`rounded-xl px-3 py-2 text-left transition ${
                     index === 0
                       ? "bg-white text-[#071b33] shadow-sm hover:bg-cyan-50"
                       : "text-cyan-50/80 hover:bg-white/10 hover:text-white"
@@ -1890,7 +2194,7 @@ export default function Dashboard() {
                 </button>
               ))}
               <button
-                className={`rounded-xl px-3 py-2.5 text-left transition ${
+                className={`rounded-xl px-3 py-2 text-left transition ${
                   showMoreActions
                     ? "bg-white/15 text-white"
                     : "text-cyan-50/80 hover:bg-white/10 hover:text-white"
@@ -1942,7 +2246,7 @@ export default function Dashboard() {
             </nav>
           </div>
 
-          <div className="mt-8 rounded-2xl border border-white/10 bg-white/10 p-4 text-sm leading-6 text-cyan-50">
+          <div className="mt-5 rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
             <p className="font-semibold text-white">Tip</p>
             <p className="mt-1 text-cyan-50/80">
               Work top to bottom: sync HubSpot, confirm the campaign, generate
@@ -1951,10 +2255,10 @@ export default function Dashboard() {
           </div>
         </aside>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-8">
-        <header className="flex flex-col justify-between gap-4 border-b border-slate-300/70 pb-6 lg:flex-row lg:items-end">
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+        <header className="flex flex-col justify-between gap-3 border-b border-slate-300/70 pb-4 lg:flex-row lg:items-end">
           <div>
-            <h1 className="text-3xl font-semibold text-slate-950">
+            <h1 className="text-2xl font-semibold text-slate-950">
               Marketing Assistant AI
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
@@ -1977,76 +2281,57 @@ export default function Dashboard() {
         )}
 
         <section
-          className="scroll-mt-6 overflow-hidden rounded-3xl border border-white/10 bg-[linear-gradient(135deg,#071b33_0%,#0b2a52_48%,#0f766e_100%)] p-7 text-white shadow-[0_30px_90px_rgba(7,27,51,0.34)] sm:p-8"
+          className="scroll-mt-5 overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(135deg,#071b33_0%,#0b2a52_48%,#0f766e_100%)] p-4 text-white shadow-[0_14px_42px_rgba(7,27,51,0.22)]"
           ref={heroRef}
         >
-          <div className="flex flex-col gap-8 lg:flex-row lg:items-center lg:justify-between">
-            <div className="max-w-3xl">
-              <div className="mb-6 flex size-16 items-center justify-center rounded-2xl border border-white/15 bg-white/10 text-2xl font-semibold shadow-inner">
-                MA
-              </div>
-              <p className="text-sm font-medium uppercase tracking-wide text-cyan-200">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-xs font-medium uppercase tracking-wide text-cyan-200">
                 Morning Briefing
               </p>
-              <h2 className="mt-3 text-3xl font-semibold leading-10 text-white sm:text-4xl sm:leading-[3rem]">
-                Good morning. Your HubSpot database has been checked.
-                Today&apos;s send plan is ready for review.
+              <h2 className="mt-1.5 text-lg font-semibold leading-7 text-white sm:text-xl lg:text-2xl">
+                {"Good morning - today's send plan is ready."}
               </h2>
-              <p className="mt-4 max-w-2xl text-base leading-7 text-cyan-50/85">
-                {dailySendPlan.summary.totalScheduled} contacts scheduled
-                today. Broker domains are protected. Nothing sends
-                automatically.
+              <p className="mt-1.5 max-w-2xl text-sm leading-6 text-cyan-50/85">
+                {dailySendPlan.summary.totalScheduled} contacts scheduled.
+                Broker domains are protected. Nothing sends automatically.
               </p>
-              <p className="mt-3 text-sm text-cyan-100/80">
+              <p className="mt-1.5 text-xs text-cyan-100/80">
                 HubSpot status: {getHubSpotStatusLabel(hubSpotStatus.status)}.
                 {hubSpotStatus.lastSyncAt
                   ? ` Last sync: ${formatDateTime(hubSpotStatus.lastSyncAt)}.`
                   : " Last sync unavailable."}
               </p>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/10 p-4 shadow-2xl shadow-slate-950/20 backdrop-blur">
+            <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/10 p-2.5 shadow-lg shadow-slate-950/15 backdrop-blur sm:flex-row sm:flex-wrap sm:items-center xl:justify-end">
               <button
-                className="h-16 w-full rounded-xl bg-emerald-400 px-10 text-lg font-bold text-[#071b33] shadow-lg shadow-emerald-950/20 transition hover:bg-emerald-300 lg:w-auto"
+                className="h-9 shrink-0 whitespace-nowrap rounded-lg bg-emerald-400 px-4 text-sm font-bold text-[#071b33] shadow-md shadow-emerald-950/15 transition hover:bg-emerald-300"
                 onClick={handleRunTodaysMarketing}
                 type="button"
               >
                 Review Today
               </button>
-              <p className="mt-3 max-w-52 text-sm leading-5 text-cyan-50/75">
-                Opens the workflow for today&apos;s domain-safe send plan.
-              </p>
-              <div className="mt-4 border-t border-white/10 pt-4">
-                {hubSpotStatus.status === "private_token" ? (
-                  <div className="mb-3 flex h-12 w-full items-center justify-center rounded-xl border border-emerald-200/40 bg-emerald-300/15 px-6 text-sm font-bold text-emerald-100">
-                    Private token connected
-                  </div>
-                ) : hubSpotStatus.status !== "connected" ? (
-                  <button
-                    className="mb-3 h-12 w-full rounded-xl border border-white/20 bg-white/10 px-6 text-sm font-bold text-white transition hover:bg-white/20"
-                    onClick={handleConnectHubSpot}
-                    type="button"
-                  >
-                    Connect HubSpot
-                  </button>
-                ) : null}
+              {hubSpotStatus.status === "private_token" ? (
+                <div className="flex h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-emerald-200/40 bg-emerald-300/15 px-3 text-xs font-bold text-emerald-100">
+                  Private token connected
+                </div>
+              ) : hubSpotStatus.status !== "connected" ? (
                 <button
-                  className="h-12 w-full rounded-xl bg-blue-500 px-6 text-sm font-bold text-white shadow-lg shadow-blue-950/20 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-300"
-                  disabled={isSyncingHubSpot}
-                  onClick={handleHubSpotSync}
+                  className="h-9 shrink-0 whitespace-nowrap rounded-lg border border-white/20 bg-white/10 px-3 text-xs font-bold text-white transition hover:bg-white/20"
+                  onClick={handleConnectHubSpot}
                   type="button"
                 >
-                  {isSyncingHubSpot ? "Syncing..." : "Sync HubSpot"}
+                  Connect HubSpot
                 </button>
-                <p className="mt-2 max-w-56 text-sm leading-5 text-cyan-50/75">
-                  Pull the latest contacts and activity from HubSpot.
-                </p>
-                <p className="mt-2 text-xs font-medium text-cyan-100/70">
-                  {hubSpotStatus.status === "connected" ||
-                  hubSpotStatus.status === "private_token"
-                    ? "HubSpot sync preview ready."
-                    : "Connect HubSpot to enable read-only sync."}
-                </p>
-              </div>
+              ) : null}
+              <button
+                className="h-9 shrink-0 whitespace-nowrap rounded-lg bg-blue-500 px-3 text-xs font-bold text-white shadow-md shadow-blue-950/15 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-300"
+                disabled={isSyncingHubSpot}
+                onClick={handleHubSpotSync}
+                type="button"
+              >
+                {isSyncingHubSpot ? "Syncing..." : "Sync HubSpot"}
+              </button>
             </div>
           </div>
           {false && showDailyWorkflow && (
@@ -2059,7 +2344,7 @@ export default function Dashboard() {
           )}
         </section>
 
-        <section className="rounded-3xl border border-white bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.12)]">
+        <section className="rounded-2xl border border-white bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.10)]">
           <div className="mb-4">
             <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
               Marketing Health Check
@@ -2069,33 +2354,33 @@ export default function Dashboard() {
             </h2>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-            <div className="rounded-2xl border border-teal-100 bg-teal-50 p-5 shadow-sm">
+            <div className="rounded-xl border border-teal-100 bg-teal-50 p-4 shadow-sm">
               <p className="text-sm text-slate-500">Synced contacts</p>
-              <p className="mt-3 text-4xl font-semibold text-slate-950">
+              <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.totalContacts}
               </p>
             </div>
-            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5 shadow-sm">
+            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-4 shadow-sm">
               <p className="text-sm text-slate-500">Eligible contacts</p>
-              <p className="mt-3 text-4xl font-semibold text-slate-950">
+              <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.eligibleContacts}
               </p>
             </div>
-            <div className="rounded-2xl border border-amber-100 bg-amber-50 p-5 shadow-sm">
+            <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 shadow-sm">
               <p className="text-sm text-slate-500">Enrolled contacts</p>
-              <p className="mt-3 text-4xl font-semibold text-slate-950">
+              <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.enrolledContacts}
               </p>
             </div>
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5 shadow-sm">
+            <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 shadow-sm">
               <p className="text-sm text-slate-500">Scheduled today</p>
-              <p className="mt-3 text-4xl font-semibold text-slate-950">
+              <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.scheduledToday}
               </p>
             </div>
-            <div className="rounded-2xl border border-rose-100 bg-rose-50 p-5 shadow-sm">
+            <div className="rounded-xl border border-rose-100 bg-rose-50 p-4 shadow-sm">
               <p className="text-sm text-slate-500">Protected / excluded</p>
-              <p className="mt-3 text-4xl font-semibold text-slate-950">
+              <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.protectedContacts}
               </p>
             </div>
@@ -2103,7 +2388,7 @@ export default function Dashboard() {
         </section>
 
         <section
-          className="scroll-mt-6 rounded-3xl border border-cyan-100 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.10)]"
+          className="scroll-mt-5 rounded-2xl border border-cyan-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]"
           ref={sendPlanRef}
         >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -2119,14 +2404,14 @@ export default function Dashboard() {
                 automatically.
               </p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:max-w-[44rem] lg:justify-end">
               {hasStarterCampaign ? (
-                <div className="flex h-11 items-center rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-bold text-emerald-800">
+                <div className="flex h-10 shrink-0 items-center whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800">
                   Starter campaign ready
                 </div>
               ) : (
                 <button
-                  className="h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                  className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
                   disabled={isCreatingStarterCampaign}
                   onClick={() =>
                     void handleCampaignScheduleAction("create_starter_campaign")
@@ -2139,12 +2424,12 @@ export default function Dashboard() {
                 </button>
               )}
               {hasEnrolledContacts ? (
-                <div className="flex h-11 items-center rounded-xl border border-blue-200 bg-blue-50 px-4 text-sm font-bold text-blue-800">
+                <div className="flex h-10 shrink-0 items-center whitespace-nowrap rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-bold text-blue-800">
                   {dailySendPlan.diagnostics.enrolledContactCount} contacts enrolled
                 </div>
               ) : (
                 <button
-                  className="h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                  className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
                   disabled={isEnrollingContacts}
                   onClick={() =>
                     void handleCampaignScheduleAction("enroll_eligible_contacts")
@@ -2155,7 +2440,7 @@ export default function Dashboard() {
                 </button>
               )}
               <button
-                className="h-11 rounded-xl bg-[#071b33] px-5 text-sm font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={isGeneratingSchedule}
                 onClick={handleGenerateDailySchedule}
                 type="button"
@@ -2163,62 +2448,66 @@ export default function Dashboard() {
                 {isGeneratingSchedule ? "Generating..." : "Generate Today"}
               </button>
               <button
-                className="h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
-                disabled={dailySendPlan.summary.totalScheduled === 0}
-                onClick={handleGenerateDraftsPreview}
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                disabled={
+                  isGeneratingDrafts || dailySendPlan.summary.totalScheduled === 0
+                }
+                onClick={() => void handleGenerateDraftsPreview()}
                 type="button"
               >
-                Generate Today&apos;s Drafts
+                {isGeneratingDrafts
+                  ? "Generating Drafts..."
+                  : "Generate Today's Drafts"}
               </button>
             </div>
           </div>
 
-          <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
-            <div className="rounded-2xl border border-cyan-100 bg-cyan-50 p-4">
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+            <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
                 Scheduled
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.totalScheduled}
               </p>
             </div>
-            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
                 Domains protected
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.brokerDomainsProtected}
               </p>
             </div>
-            <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4">
+            <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
                 Domain skips
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.skippedDueToDomainLimits}
               </p>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Email 1
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.dueEmail1}
               </p>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Email 2
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.dueEmail2}
               </p>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Email 3
               </p>
-              <p className="mt-2 text-3xl font-semibold text-slate-950">
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.dueEmail3}
               </p>
             </div>
@@ -2404,8 +2693,221 @@ export default function Dashboard() {
           )}
         </section>
 
+        <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
+                Draft Review
+              </p>
+              <h2 className="mt-1 text-xl font-semibold text-slate-950">
+                Today&apos;s Drafts
+              </h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+                These drafts are generated from your campaign templates and
+                scheduled contacts. Review and approve them before any future
+                sending step. Nothing sends automatically.
+              </p>
+            </div>
+            <button
+              className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+              disabled={
+                isGeneratingDrafts || dailySendPlan.summary.totalScheduled === 0
+              }
+              onClick={() => void handleGenerateDraftsPreview()}
+              type="button"
+            >
+              {isGeneratingDrafts
+                ? "Generating Drafts..."
+                : "Generate Today's Drafts"}
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                Drafts generated
+              </p>
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
+                {emailDraftSummary.totalDrafts}
+              </p>
+            </div>
+            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                Approved
+              </p>
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
+                {emailDraftSummary.approved}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+                Skipped
+              </p>
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
+                {emailDraftSummary.skippedDrafts}
+              </p>
+            </div>
+            <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+                Remaining
+              </p>
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
+                {emailDraftSummary.remaining}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-4">
+            {dailyDrafts.length > 0 ? (
+              dailyDrafts.map((draft) => {
+                const isEditing = editingDraftId === draft.id;
+                const isUpdating = updatingDraftId === draft.id;
+
+                return (
+                  <div
+                    className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                    key={draft.id}
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold text-slate-950">
+                            {getDraftContactName(draft)}
+                          </p>
+                          <span
+                            className={`rounded-lg border px-2.5 py-1 text-xs font-bold ${getDraftStatusClasses(
+                              draft.status,
+                            )}`}
+                          >
+                            {getDraftStatusLabel(draft.status)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {draft.contact_email}
+                        </p>
+                        {draft.contact_company && (
+                          <p className="mt-1 text-sm text-slate-500">
+                            {draft.contact_company}
+                          </p>
+                        )}
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
+                        Email {draft.step_number ?? 1}
+                      </div>
+                    </div>
+
+                    {isEditing ? (
+                      <div className="mt-4 grid gap-3">
+                        <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                          Subject
+                          <input
+                            className="h-10 rounded-xl border border-slate-300 bg-white px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                            onChange={(event) =>
+                              setEmailDraftForm((current) => ({
+                                ...current,
+                                subject: event.target.value,
+                              }))
+                            }
+                            value={emailDraftForm.subject}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                          Body
+                          <textarea
+                            className="min-h-52 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 font-normal leading-6 outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                            onChange={(event) =>
+                              setEmailDraftForm((current) => ({
+                                ...current,
+                                body: event.target.value,
+                              }))
+                            }
+                            value={emailDraftForm.body}
+                          />
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            className="h-10 rounded-xl bg-[#071b33] px-4 text-sm font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                            disabled={isUpdating}
+                            onClick={() => void handleSaveDraft(draft.id)}
+                            type="button"
+                          >
+                            {isUpdating ? "Saving..." : "Save edits"}
+                          </button>
+                          <button
+                            className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
+                            onClick={() => setEditingDraftId(null)}
+                            type="button"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-4 rounded-xl border border-white bg-white p-4">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Subject
+                        </p>
+                        <p className="mt-1 font-semibold text-slate-950">
+                          {draft.subject}
+                        </p>
+                        <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Body
+                        </p>
+                        <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">
+                          {draft.body}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button
+                        className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                        disabled={isUpdating}
+                        onClick={() =>
+                          isEditing
+                            ? setEditingDraftId(null)
+                            : handleEditDraft(draft)
+                        }
+                        type="button"
+                      >
+                        {isEditing ? "Close editor" : "Edit"}
+                      </button>
+                      <button
+                        className="h-10 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
+                        disabled={isUpdating || draft.status === "approved"}
+                        onClick={() =>
+                          void handleDraftStatusAction(draft.id, "approve_draft")
+                        }
+                        type="button"
+                      >
+                        {isUpdating ? "Updating..." : "Approve Draft"}
+                      </button>
+                      <button
+                        className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                        disabled={isUpdating || draft.status === "skipped"}
+                        onClick={() =>
+                          void handleDraftStatusAction(draft.id, "skip_draft")
+                        }
+                        type="button"
+                      >
+                        Skip
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
+                Generate today&apos;s send plan, then generate today&apos;s
+                drafts. Drafts will appear here for review before any future
+                sending step.
+              </div>
+            )}
+          </div>
+        </section>
+
         <section
-          className="scroll-mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.08)]"
+          className="scroll-mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.07)]"
           ref={campaignPreviewRef}
         >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -2422,7 +2924,7 @@ export default function Dashboard() {
               </p>
             </div>
             <button
-              className="h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+              className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
               disabled={isResettingStarterCopy || !activeCampaign}
               onClick={() => void handleResetStarterCampaignCopy()}
               type="button"
@@ -2432,7 +2934,7 @@ export default function Dashboard() {
                 : "Reset starter message copy"}
             </button>
             {activeCampaign && (
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700 lg:min-w-80">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 lg:min-w-72">
                 <p className="font-semibold text-slate-950">
                   {activeCampaign.name}
                 </p>
@@ -2481,14 +2983,14 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="mt-5 grid gap-4 lg:grid-cols-3">
+          <div className="mt-4 grid gap-3 lg:grid-cols-3">
             {activeCampaignSteps.length > 0 ? (
               activeCampaignSteps.map((step) => {
                 const isEditing = editingCampaignStepId === step.id;
 
                 return (
                   <div
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                    className="rounded-xl border border-slate-200 bg-slate-50 p-4"
                     key={step.id}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -2578,7 +3080,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <section className="rounded-3xl border border-violet-100 bg-violet-50/70 p-6 shadow-[0_24px_70px_rgba(76,29,149,0.10)]">
+        <section className="rounded-2xl border border-violet-100 bg-violet-50/70 p-5 shadow-[0_18px_52px_rgba(76,29,149,0.08)]">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-lg font-semibold text-slate-950">
@@ -2589,8 +3091,8 @@ export default function Dashboard() {
               </p>
             </div>
           </div>
-          <div className="mt-4 grid gap-4 lg:grid-cols-6">
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+          <div className="mt-4 grid gap-3 lg:grid-cols-6">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 1. Sync HubSpot
               </span>
@@ -2600,7 +3102,7 @@ export default function Dashboard() {
                   : "Refresh HubSpot before planning today."}
               </p>
             </div>
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 2. Confirm campaign
               </span>
@@ -2610,7 +3112,7 @@ export default function Dashboard() {
                   : "Create the starter campaign before enrolling contacts."}
               </p>
             </div>
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 3. Enroll contacts
               </span>
@@ -2620,7 +3122,7 @@ export default function Dashboard() {
                   : "Enroll eligible HubSpot contacts into the campaign."}
               </p>
             </div>
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 4. Generate send plan
               </span>
@@ -2630,7 +3132,7 @@ export default function Dashboard() {
                   : "Generate today's plan when setup is ready."}
               </p>
             </div>
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 5. Generate drafts
               </span>
@@ -2638,7 +3140,7 @@ export default function Dashboard() {
                 Next phase: create draft emails from the approved message steps.
               </p>
             </div>
-            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 6. Review / approve / skip
               </span>
