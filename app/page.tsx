@@ -1769,6 +1769,13 @@ export default function Dashboard() {
     );
   }
 
+  function handleGenerateDraftsPreview() {
+    setError("");
+    setMessage(
+      "Draft generation is the next phase. No drafts were generated and nothing was sent.",
+    );
+  }
+
   function scrollToElement(ref: { current: HTMLElement | null }) {
     window.setTimeout(() => {
       ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2155,6 +2162,14 @@ export default function Dashboard() {
               >
                 {isGeneratingSchedule ? "Generating..." : "Generate Today"}
               </button>
+              <button
+                className="h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                disabled={dailySendPlan.summary.totalScheduled === 0}
+                onClick={handleGenerateDraftsPreview}
+                type="button"
+              >
+                Generate Today&apos;s Drafts
+              </button>
             </div>
           </div>
 
@@ -2307,6 +2322,51 @@ export default function Dashboard() {
                   {scheduleEmptyReason}
                 </div>
               )}
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="grid gap-3 text-sm md:grid-cols-5">
+              <div className="rounded-xl border border-cyan-100 bg-white p-4">
+                <p className="font-semibold text-slate-950">
+                  1. Generate Today&apos;s Send Plan
+                </p>
+                <p className="mt-1 text-slate-600">
+                  Builds the domain-safe list from enrolled contacts.
+                </p>
+              </div>
+              <div className="rounded-xl border border-cyan-100 bg-white p-4">
+                <p className="font-semibold text-slate-950">
+                  2. Generate Today&apos;s Drafts
+                </p>
+                <p className="mt-1 text-slate-600">
+                  Coming next. Drafts will use the campaign message steps.
+                </p>
+              </div>
+              <div className="rounded-xl border border-cyan-100 bg-white p-4">
+                <p className="font-semibold text-slate-950">
+                  3. Review drafts
+                </p>
+                <p className="mt-1 text-slate-600">
+                  Read every draft before anything is approved.
+                </p>
+              </div>
+              <div className="rounded-xl border border-cyan-100 bg-white p-4">
+                <p className="font-semibold text-slate-950">
+                  4. Edit / approve / skip
+                </p>
+                <p className="mt-1 text-slate-600">
+                  The user stays in control of each contact.
+                </p>
+              </div>
+              <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
+                <p className="font-semibold text-amber-950">
+                  Later: send approved emails
+                </p>
+                <p className="mt-1 text-amber-800">
+                  Sending is not connected in this phase.
+                </p>
+              </div>
             </div>
           </div>
 
@@ -2525,11 +2585,11 @@ export default function Dashboard() {
                 What to do next
               </h2>
               <p className="mt-1 text-sm text-slate-500">
-                Follow the workflow from HubSpot sync to a reviewed send plan.
+                Follow the workflow from HubSpot sync to a reviewed draft path.
               </p>
             </div>
           </div>
-          <div className="mt-4 grid gap-4 lg:grid-cols-4">
+          <div className="mt-4 grid gap-4 lg:grid-cols-6">
             <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
                 1. Sync HubSpot
@@ -2562,12 +2622,28 @@ export default function Dashboard() {
             </div>
             <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
               <span className="font-semibold text-slate-950">
-                4. Review plan
+                4. Generate send plan
               </span>
               <p className="mt-1">
                 {dailySendPlan.summary.totalScheduled > 0
                   ? `${dailySendPlan.summary.totalScheduled} contacts are scheduled for review.`
                   : "Generate today's plan when setup is ready."}
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+              <span className="font-semibold text-slate-950">
+                5. Generate drafts
+              </span>
+              <p className="mt-1">
+                Next phase: create draft emails from the approved message steps.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white bg-white p-5 text-sm text-slate-700 shadow-sm">
+              <span className="font-semibold text-slate-950">
+                6. Review / approve / skip
+              </span>
+              <p className="mt-1">
+                Sending stays off until a later approved-email phase.
               </p>
             </div>
           </div>
