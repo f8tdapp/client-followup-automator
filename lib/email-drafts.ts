@@ -430,19 +430,26 @@ async function loadCampaignSteps(stepIds: string[]) {
     return [];
   }
 
-  const { data, error } = await runDraftQuery("campaign_steps.select_drafts", () =>
-    getSupabaseAdmin()
-      .from("campaign_steps")
-      .select("id,step_number,subject_template,body_template")
-      .in("id", stepIds)
-      .returns<CampaignStepRow[]>(),
-  );
+  const uniqueStepIds = Array.from(new Set(stepIds));
+  const steps: CampaignStepRow[] = [];
 
-  if (error) {
-    throw createEmailDraftError("campaign_steps.select_drafts", error);
+  for (const chunk of chunkArray(uniqueStepIds, emailDraftLookupChunkSize)) {
+    const { data, error } = await runDraftQuery("campaign_steps.select_drafts", () =>
+      getSupabaseAdmin()
+        .from("campaign_steps")
+        .select("id,step_number,subject_template,body_template")
+        .in("id", chunk)
+        .returns<CampaignStepRow[]>(),
+    );
+
+    if (error) {
+      throw createEmailDraftError("campaign_steps.select_drafts", error);
+    }
+
+    steps.push(...(data ?? []));
   }
 
-  return data ?? [];
+  return steps;
 }
 
 function personalizeTemplate(template: string, contact: HubSpotContactRow) {

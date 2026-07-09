@@ -370,14 +370,14 @@ function normalizeCsvHeader(header: string) {
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) {
     if (isHeadersOverflowMessage(error.message)) {
-      return "Today's send plan could not load because the contact lookup was too large. Please try again after the query fix.";
+      return "Today's send plan could not load. The contact lookup was too large. Please try again after refreshing.";
     }
 
     return error.message;
   }
 
   if (typeof error === "string" && isHeadersOverflowMessage(error)) {
-    return "Today's send plan could not load because the contact lookup was too large. Please try again after the query fix.";
+    return "Today's send plan could not load. The contact lookup was too large. Please try again after refreshing.";
   }
 
   return fallback;

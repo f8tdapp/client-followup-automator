@@ -174,8 +174,8 @@ const suppressionTypes = new Set([
 ]);
 const suppressionDiagnosticsWarning =
   "Could not read contact_suppression_rules diagnostics.";
-const contactLookupChunkSize = 50;
-const scheduleContactLookupChunkSize = 50;
+const contactLookupChunkSize = 25;
+const scheduleContactLookupChunkSize = 25;
 const maxDueEnrollmentsPerCampaign = 250;
 
 export function createEmptyDailySendPlan(
@@ -1441,31 +1441,55 @@ async function getCampaignStepCount(campaignIds: string[]) {
     return 0;
   }
 
+  const uniqueCampaignIds = Array.from(new Set(campaignIds));
+  const campaignIdChunks = chunkArray(uniqueCampaignIds, contactLookupChunkSize);
   const supabaseAdmin = getSupabaseAdmin();
+
   logScheduleOperationStart("diagnostics.campaign_step_count", {
-    campaignCount: campaignIds.length,
+    campaignCount: uniqueCampaignIds.length,
+    chunkCount: campaignIdChunks.length,
+    chunkSize: contactLookupChunkSize,
   });
-  const { count, error } = await runScheduleQuery(
-    "diagnostics.campaign_step_count",
-    () =>
-      supabaseAdmin
-        .from("campaign_steps")
-        .select("id", { count: "exact", head: true })
-        .in("campaign_id", campaignIds),
-  );
 
-  if (error) {
-    throw createCampaignScheduleOperationError(
-      "Campaign step diagnostics failed",
+  let countTotal = 0;
+
+  for (const [chunkIndex, campaignIdChunk] of campaignIdChunks.entries()) {
+    const chunkNumber = chunkIndex + 1;
+    logScheduleOperationStart("diagnostics.campaign_step_count.chunk", {
+      chunkNumber,
+      chunkCount: campaignIdChunks.length,
+      chunkSize: campaignIdChunk.length,
+    });
+
+    const { count, error } = await runScheduleQuery(
       "diagnostics.campaign_step_count",
-      error,
+      () =>
+        supabaseAdmin
+          .from("campaign_steps")
+          .select("id", { count: "exact", head: true })
+          .in("campaign_id", campaignIdChunk),
     );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Campaign step diagnostics failed",
+        "diagnostics.campaign_step_count",
+        error,
+      );
+    }
+
+    countTotal += count ?? 0;
+    logScheduleOperationSuccess("diagnostics.campaign_step_count.chunk", {
+      chunkNumber,
+      returnedCount: count ?? 0,
+    });
   }
+
   logScheduleOperationSuccess("diagnostics.campaign_step_count", {
-    count: count ?? 0,
+    count: countTotal,
   });
 
-  return count ?? 0;
+  return countTotal;
 }
 
 async function getEnrolledContactCount(campaignIds: string[]) {
@@ -1473,32 +1497,56 @@ async function getEnrolledContactCount(campaignIds: string[]) {
     return 0;
   }
 
+  const uniqueCampaignIds = Array.from(new Set(campaignIds));
+  const campaignIdChunks = chunkArray(uniqueCampaignIds, contactLookupChunkSize);
   const supabaseAdmin = getSupabaseAdmin();
+
   logScheduleOperationStart("diagnostics.enrolled_contact_count", {
-    campaignCount: campaignIds.length,
+    campaignCount: uniqueCampaignIds.length,
+    chunkCount: campaignIdChunks.length,
+    chunkSize: contactLookupChunkSize,
   });
-  const { count, error } = await runScheduleQuery(
-    "diagnostics.enrolled_contact_count",
-    () =>
-      supabaseAdmin
-        .from("contact_campaign_enrollments")
-        .select("id", { count: "exact", head: true })
-        .in("campaign_id", campaignIds)
-        .eq("status", "active"),
-  );
 
-  if (error) {
-    throw createCampaignScheduleOperationError(
-      "Enrollment diagnostics failed",
+  let countTotal = 0;
+
+  for (const [chunkIndex, campaignIdChunk] of campaignIdChunks.entries()) {
+    const chunkNumber = chunkIndex + 1;
+    logScheduleOperationStart("diagnostics.enrolled_contact_count.chunk", {
+      chunkNumber,
+      chunkCount: campaignIdChunks.length,
+      chunkSize: campaignIdChunk.length,
+    });
+
+    const { count, error } = await runScheduleQuery(
       "diagnostics.enrolled_contact_count",
-      error,
+      () =>
+        supabaseAdmin
+          .from("contact_campaign_enrollments")
+          .select("id", { count: "exact", head: true })
+          .in("campaign_id", campaignIdChunk)
+          .eq("status", "active"),
     );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Enrollment diagnostics failed",
+        "diagnostics.enrolled_contact_count",
+        error,
+      );
+    }
+
+    countTotal += count ?? 0;
+    logScheduleOperationSuccess("diagnostics.enrolled_contact_count.chunk", {
+      chunkNumber,
+      returnedCount: count ?? 0,
+    });
   }
+
   logScheduleOperationSuccess("diagnostics.enrolled_contact_count", {
-    count: count ?? 0,
+    count: countTotal,
   });
 
-  return count ?? 0;
+  return countTotal;
 }
 
 function getZeroScheduleReason({
@@ -1560,38 +1608,56 @@ async function enrichDailySendScheduleRows(
   const campaignIds = Array.from(new Set(rows.map((row) => row.campaign_id)));
   const stepIds = Array.from(new Set(rows.map((row) => row.campaign_step_id)));
 
-  const [{ data: campaigns, error: campaignsError }, { data: steps, error: stepsError }] =
-    await Promise.all([
-      runScheduleQuery("daily_send_schedule.load_campaigns", () =>
+  const uniqueCampaignIds = Array.from(new Set(campaignIds));
+  const uniqueStepIds = Array.from(new Set(stepIds));
+  const campaignChunks = chunkArray(uniqueCampaignIds, contactLookupChunkSize);
+  const stepChunks = chunkArray(uniqueStepIds, contactLookupChunkSize);
+
+  const campaigns: Array<{ id: string; name: string }> = [];
+  const steps: Array<{ id: string; step_number: number }> = [];
+
+  for (const campaignChunk of campaignChunks) {
+    const { data, error } = await runScheduleQuery(
+      "daily_send_schedule.load_campaigns",
+      () =>
         supabaseAdmin
           .from("campaigns")
           .select("id,name")
-          .in("id", campaignIds)
+          .in("id", campaignChunk)
           .returns<Array<{ id: string; name: string }>>(),
-      ),
-      runScheduleQuery("daily_send_schedule.load_steps", () =>
+    );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Daily send schedule campaign load failed",
+        "daily_send_schedule.load_campaigns",
+        error,
+      );
+    }
+
+    campaigns.push(...(data ?? []));
+  }
+
+  for (const stepChunk of stepChunks) {
+    const { data, error } = await runScheduleQuery(
+      "daily_send_schedule.load_steps",
+      () =>
         supabaseAdmin
           .from("campaign_steps")
           .select("id,step_number")
-          .in("id", stepIds)
+          .in("id", stepChunk)
           .returns<Array<{ id: string; step_number: number }>>(),
-      ),
-    ]);
-
-  if (campaignsError) {
-    throw createCampaignScheduleOperationError(
-      "Daily send schedule campaign load failed",
-      "daily_send_schedule.load_campaigns",
-      campaignsError,
     );
-  }
 
-  if (stepsError) {
-    throw createCampaignScheduleOperationError(
-      "Daily send schedule step load failed",
-      "daily_send_schedule.load_steps",
-      stepsError,
-    );
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Daily send schedule step load failed",
+        "daily_send_schedule.load_steps",
+        error,
+      );
+    }
+
+    steps.push(...(data ?? []));
   }
 
   const contacts = await loadDailyScheduleContacts(contactIds);
@@ -1618,6 +1684,7 @@ async function loadDailyScheduleContacts(contactIds: string[]) {
     return [];
   }
 
+  const uniqueContactIds = Array.from(new Set(contactIds));
   const supabaseAdmin = getSupabaseAdmin();
   const contacts: Array<{
     id: string;
@@ -1628,10 +1695,10 @@ async function loadDailyScheduleContacts(contactIds: string[]) {
     email: string | null;
     is_unsubscribed: boolean | null;
   }> = [];
-  const contactIdChunks = chunkArray(contactIds, scheduleContactLookupChunkSize);
+  const contactIdChunks = chunkArray(uniqueContactIds, scheduleContactLookupChunkSize);
 
   logScheduleOperationStart("daily_send_schedule.load_contacts", {
-    contactCount: contactIds.length,
+    contactCount: uniqueContactIds.length,
     chunkCount: contactIdChunks.length,
     chunkSize: scheduleContactLookupChunkSize,
   });
@@ -1862,38 +1929,61 @@ async function getSuppressionRules(
     return new Map<string, SuppressionRuleRow[]>();
   }
 
+  const uniqueContactIds = Array.from(new Set(contactIds));
+  const contactIdChunks = chunkArray(uniqueContactIds, contactLookupChunkSize);
   const supabaseAdmin = getSupabaseAdmin();
-  logScheduleOperationStart(operation, {
-    contactCount: contactIds.length,
-  });
-  const { data, error } = await runScheduleQuery(
-    operation,
-    () =>
-      supabaseAdmin
-        .from("contact_suppression_rules")
-        .select("contact_id,suppression_type,reason,snoozed_until")
-        .in("contact_id", contactIds)
-        .eq("active", true)
-        .returns<SuppressionRuleRow[]>(),
-  );
-
-  if (error) {
-    throw createCampaignScheduleOperationError(
-      "Suppression rule diagnostics failed",
-      operation,
-      error,
-    );
-  }
-
   const rulesByContact = new Map<string, SuppressionRuleRow[]>();
 
-  for (const rule of data ?? []) {
-    const existingRules = rulesByContact.get(rule.contact_id) ?? [];
-    existingRules.push(rule);
-    rulesByContact.set(rule.contact_id, existingRules);
+  logScheduleOperationStart(operation, {
+    contactCount: uniqueContactIds.length,
+    chunkCount: contactIdChunks.length,
+    chunkSize: contactLookupChunkSize,
+  });
+
+  for (const [chunkIndex, contactIdChunk] of contactIdChunks.entries()) {
+    const chunkNumber = chunkIndex + 1;
+    logScheduleOperationStart(`${operation}.chunk`, {
+      chunkNumber,
+      chunkCount: contactIdChunks.length,
+      chunkSize: contactIdChunk.length,
+    });
+
+    const { data, error } = await runScheduleQuery(
+      operation,
+      () =>
+        supabaseAdmin
+          .from("contact_suppression_rules")
+          .select("contact_id,suppression_type,reason,snoozed_until")
+          .in("contact_id", contactIdChunk)
+          .eq("active", true)
+          .returns<SuppressionRuleRow[]>(),
+    );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Suppression rule diagnostics failed",
+        operation,
+        error,
+      );
+    }
+
+    for (const rule of data ?? []) {
+      const existingRules = rulesByContact.get(rule.contact_id) ?? [];
+      existingRules.push(rule);
+      rulesByContact.set(rule.contact_id, existingRules);
+    }
+
+    logScheduleOperationSuccess(`${operation}.chunk`, {
+      chunkNumber,
+      ruleCount: data?.length ?? 0,
+    });
   }
+
   logScheduleOperationSuccess(operation, {
-    ruleCount: data?.length ?? 0,
+    ruleCount: Array.from(rulesByContact.values()).reduce(
+      (total, rules) => total + rules.length,
+      0,
+    ),
   });
 
   return rulesByContact;

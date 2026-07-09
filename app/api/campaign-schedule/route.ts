@@ -330,15 +330,18 @@ function getScheduleErrorOperation(error: unknown, fallbackOperation: string) {
 }
 
 function getScheduleErrorMessage(error: unknown) {
-  if (error instanceof CampaignScheduleOperationError) {
-    return error.details;
+  const message =
+    error instanceof CampaignScheduleOperationError
+      ? error.details
+      : error instanceof Error
+        ? error.message
+        : "Unable to generate campaign schedule.";
+
+  if (isHeadersOverflowMessage(message)) {
+    return "Today's send plan could not load. The contact lookup was too large. Please try again after refreshing.";
   }
 
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "Unable to generate campaign schedule.";
+  return message;
 }
 
 function getScheduleErrorDetails(
@@ -347,16 +350,32 @@ function getScheduleErrorDetails(
   safeErrorMessage: string,
 ) {
   if (error instanceof CampaignScheduleOperationError) {
-    return error.details;
+    const details = error.details;
+
+    if (isHeadersOverflowMessage(details)) {
+      return safeErrorMessage;
+    }
+
+    return details;
   }
 
   if (error && typeof error === "object" && "details" in error) {
     const details = (error as { details?: unknown }).details;
 
     if (typeof details === "string" && details.trim()) {
-      return details;
+      return isHeadersOverflowMessage(details) ? safeErrorMessage : details;
     }
   }
 
   return `${operation} failed. message: ${safeErrorMessage}`;
+}
+
+function isHeadersOverflowMessage(message: string) {
+  const normalizedMessage = message.toLowerCase();
+
+  return (
+    normalizedMessage.includes("headers overflow") ||
+    normalizedMessage.includes("request url is") ||
+    (normalizedMessage.includes("url is") && normalizedMessage.includes("characters"))
+  );
 }
