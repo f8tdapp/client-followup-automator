@@ -144,6 +144,7 @@ type CampaignStep = {
 };
 
 type EmailDraftStatus = "draft" | "approved" | "skipped";
+type EmailDraftFilter = "needs_review" | "approved" | "skipped" | "all";
 
 type EmailDraft = {
   id: string;
@@ -336,6 +337,13 @@ const emptyEmailDraftSummary: EmailDraftSummary = {
   remaining: 0,
 };
 
+const draftFilters: Array<{ label: string; value: EmailDraftFilter }> = [
+  { label: "Needs review", value: "needs_review" },
+  { label: "Approved", value: "approved" },
+  { label: "Skipped", value: "skipped" },
+  { label: "All", value: "all" },
+];
+
 const campaignStatuses = [
   { label: "Draft", value: "draft" },
   { label: "Active", value: "active" },
@@ -365,6 +373,20 @@ function normalizeCsvHeader(header: string) {
   }
 
   return normalizedHeader;
+}
+
+function formatScheduleReason(reason: string) {
+  const normalizedReason = reason.trim().toLowerCase();
+
+  if (
+    normalizedReason.includes("daily send limit") ||
+    normalizedReason.includes("domain limit") ||
+    normalizedReason.includes("rate limit")
+  ) {
+    return "Held for a future day to protect today’s send limit.";
+  }
+
+  return reason;
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -681,6 +703,20 @@ function getDraftStatusClasses(status: EmailDraftStatus) {
   return "border-cyan-200 bg-cyan-50 text-cyan-800";
 }
 
+function getDraftBodyPreview(body: string) {
+  const firstLine =
+    body
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+
+  if (!firstLine) {
+    return "No body copy yet.";
+  }
+
+  return firstLine.length > 140 ? `${firstLine.slice(0, 137)}...` : firstLine;
+}
+
 function parseCsv(text: string) {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -846,6 +882,10 @@ export default function Dashboard() {
     body: "",
   });
   const [updatingDraftId, setUpdatingDraftId] = useState<string | null>(null);
+  const [showAllScheduledContacts, setShowAllScheduledContacts] =
+    useState(false);
+  const [draftFilter, setDraftFilter] =
+    useState<EmailDraftFilter>("needs_review");
   const [importSummary, setImportSummary] =
     useState<ImportSummary>(emptyImportSummary);
   const [openPanel, setOpenPanel] = useState<
@@ -997,9 +1037,27 @@ export default function Dashboard() {
   const scheduledSendRows = dailySendPlan.schedule.filter(
     (scheduleRow) => scheduleRow.status === "scheduled",
   );
+  const visibleScheduledSendRows = showAllScheduledContacts
+    ? scheduledSendRows
+    : scheduledSendRows.slice(0, 5);
   const skippedSendRows = dailySendPlan.schedule.filter(
     (scheduleRow) => scheduleRow.status !== "scheduled",
   );
+  const activeDraftFilter =
+    emailDraftSummary.remaining > 0 || draftFilter !== "needs_review"
+      ? draftFilter
+      : "all";
+  const filteredDrafts = dailyDrafts.filter((draft) => {
+    if (activeDraftFilter === "all") {
+      return true;
+    }
+
+    if (activeDraftFilter === "needs_review") {
+      return draft.status === "draft";
+    }
+
+    return draft.status === activeDraftFilter;
+  });
   const scheduleEmptyReason =
     dailySendPlan.diagnostics.reason ??
     "Generate today's plan after syncing HubSpot and activating a message plan.";
@@ -2379,7 +2437,7 @@ export default function Dashboard() {
               </p>
             </div>
             <div className="rounded-xl border border-rose-100 bg-rose-50 p-4 shadow-sm">
-              <p className="text-sm text-slate-500">Protected / excluded</p>
+              <p className="text-sm text-slate-500">Protected today</p>
               <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.protectedContacts}
               </p>
@@ -2462,6 +2520,12 @@ export default function Dashboard() {
             </div>
           </div>
 
+          <div className="mt-3 rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2 text-sm text-cyan-900">
+            <span className="font-semibold">Today&apos;s workflow:</span>{" "}
+            Generate send plan &rarr; Generate drafts &rarr; Review drafts
+            &rarr; Approve or skip. Nothing sends automatically.
+          </div>
+
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
@@ -2473,7 +2537,7 @@ export default function Dashboard() {
             </div>
             <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                Domains protected
+                Domains checked
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.brokerDomainsProtected}
@@ -2481,7 +2545,7 @@ export default function Dashboard() {
             </div>
             <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
-                Domain skips
+                Rolled forward
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {dailySendPlan.summary.skippedDueToDomainLimits}
@@ -2511,6 +2575,10 @@ export default function Dashboard() {
                 {dailySendPlan.summary.dueEmail3}
               </p>
             </div>
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            We limit how many people from the same company or broker domain are contacted in one day. Extra contacts are rolled forward automatically.
           </div>
 
           <div className="mt-4 grid gap-3 text-sm md:grid-cols-4">
@@ -2554,15 +2622,36 @@ export default function Dashboard() {
             </div>
           )}
 
-          <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200">
-            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
-              <p className="text-sm font-semibold text-slate-950">
-                Contacts ready for review
-              </p>
+          <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
+            <div className="flex flex-col gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">
+                  Contacts ready for review
+                </p>
+                {scheduledSendRows.length > 0 && (
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    Showing {visibleScheduledSendRows.length} of{" "}
+                    {scheduledSendRows.length} scheduled contacts.
+                  </p>
+                )}
+              </div>
+              {scheduledSendRows.length > 5 && (
+                <button
+                  className="h-8 self-start whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 sm:self-auto"
+                  onClick={() =>
+                    setShowAllScheduledContacts((current) => !current)
+                  }
+                  type="button"
+                >
+                  {showAllScheduledContacts
+                    ? "Show fewer"
+                    : "Show all scheduled contacts"}
+                </button>
+              )}
             </div>
             <div className="divide-y divide-slate-100">
               {scheduledSendRows.length > 0 ? (
-                scheduledSendRows.map((scheduleRow) => {
+                visibleScheduledSendRows.map((scheduleRow) => {
                   const contact = scheduleRow.hubspot_contacts;
                   const contactName =
                     [contact?.first_name, contact?.last_name]
@@ -2602,7 +2691,9 @@ export default function Dashboard() {
                           {scheduleRow.safety_status}
                         </p>
                       </div>
-                      <p className="text-slate-600">{scheduleRow.reason}</p>
+                      <p className="text-slate-600">
+                        {formatScheduleReason(scheduleRow.reason)}
+                      </p>
                     </div>
                   );
                 })
@@ -2614,55 +2705,10 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="grid gap-3 text-sm md:grid-cols-5">
-              <div className="rounded-xl border border-cyan-100 bg-white p-4">
-                <p className="font-semibold text-slate-950">
-                  1. Generate Today&apos;s Send Plan
-                </p>
-                <p className="mt-1 text-slate-600">
-                  Builds the domain-safe list from enrolled contacts.
-                </p>
-              </div>
-              <div className="rounded-xl border border-cyan-100 bg-white p-4">
-                <p className="font-semibold text-slate-950">
-                  2. Generate Today&apos;s Drafts
-                </p>
-                <p className="mt-1 text-slate-600">
-                  Coming next. Drafts will use the campaign message steps.
-                </p>
-              </div>
-              <div className="rounded-xl border border-cyan-100 bg-white p-4">
-                <p className="font-semibold text-slate-950">
-                  3. Review drafts
-                </p>
-                <p className="mt-1 text-slate-600">
-                  Read every draft before anything is approved.
-                </p>
-              </div>
-              <div className="rounded-xl border border-cyan-100 bg-white p-4">
-                <p className="font-semibold text-slate-950">
-                  4. Edit / approve / skip
-                </p>
-                <p className="mt-1 text-slate-600">
-                  The user stays in control of each contact.
-                </p>
-              </div>
-              <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
-                <p className="font-semibold text-amber-950">
-                  Later: send approved emails
-                </p>
-                <p className="mt-1 text-amber-800">
-                  Sending is not connected in this phase.
-                </p>
-              </div>
-            </div>
-          </div>
-
           {skippedSendRows.length > 0 && (
             <div className="mt-4 rounded-2xl border border-amber-100 bg-amber-50 p-4">
               <p className="text-sm font-semibold text-amber-900">
-                Protected contacts rolled forward
+                Contacts held for a future day
               </p>
               <div className="mt-3 grid gap-2 text-sm text-amber-900 lg:grid-cols-2">
                 {skippedSendRows.slice(0, 6).map((scheduleRow) => {
@@ -2683,7 +2729,7 @@ export default function Dashboard() {
                       <span className="font-medium">{contactName}</span>
                       <span className="text-amber-700">
                         {" "}
-                        - {scheduleRow.reason}
+                        - {formatScheduleReason(scheduleRow.reason)}
                       </span>
                     </div>
                   );
@@ -2705,7 +2751,8 @@ export default function Dashboard() {
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
                 These drafts are generated from your campaign templates and
                 scheduled contacts. Review and approve them before any future
-                sending step. Nothing sends automatically.
+                sending step. Nothing sends automatically. Approve Draft does
+                not send.
               </p>
             </div>
             <button
@@ -2757,19 +2804,39 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4">
+          {dailyDrafts.length > 0 && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {draftFilters.map((filter) => (
+                <button
+                  className={`h-8 rounded-lg border px-3 text-xs font-bold transition ${
+                    activeDraftFilter === filter.value
+                      ? "border-cyan-600 bg-cyan-50 text-cyan-800"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-cyan-300 hover:text-cyan-700"
+                  }`}
+                  key={filter.value}
+                  onClick={() => setDraftFilter(filter.value)}
+                  type="button"
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3">
             {dailyDrafts.length > 0 ? (
-              dailyDrafts.map((draft) => {
+              filteredDrafts.length > 0 ? (
+              filteredDrafts.map((draft) => {
                 const isEditing = editingDraftId === draft.id;
                 const isUpdating = updatingDraftId === draft.id;
 
                 return (
                   <div
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                    className="rounded-xl border border-slate-200 bg-slate-50 p-3"
                     key={draft.id}
                   >
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div>
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1.35fr)_auto] lg:items-start">
+                      <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="font-semibold text-slate-950">
                             {getDraftContactName(draft)}
@@ -2791,13 +2858,61 @@ export default function Dashboard() {
                           </p>
                         )}
                       </div>
-                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700">
-                        Email {draft.step_number ?? 1}
+
+                      <div className="min-w-0 rounded-lg border border-white bg-white p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-bold text-slate-700">
+                            Email {draft.step_number ?? 1}
+                          </span>
+                          <p className="min-w-0 font-semibold text-slate-950">
+                            {draft.subject}
+                          </p>
+                        </div>
+                        {!isEditing && (
+                          <p className="mt-2 truncate text-sm text-slate-600">
+                            {getDraftBodyPreview(draft.body)}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 lg:justify-end">
+                        <button
+                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                          disabled={isUpdating}
+                          onClick={() =>
+                            isEditing
+                              ? setEditingDraftId(null)
+                              : handleEditDraft(draft)
+                          }
+                          type="button"
+                        >
+                          {isEditing ? "Close" : "Edit"}
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
+                          disabled={isUpdating || draft.status === "approved"}
+                          onClick={() =>
+                            void handleDraftStatusAction(draft.id, "approve_draft")
+                          }
+                          type="button"
+                        >
+                          {isUpdating ? "Updating..." : "Approve Draft"}
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                          disabled={isUpdating || draft.status === "skipped"}
+                          onClick={() =>
+                            void handleDraftStatusAction(draft.id, "skip_draft")
+                          }
+                          type="button"
+                        >
+                          Skip
+                        </button>
                       </div>
                     </div>
 
-                    {isEditing ? (
-                      <div className="mt-4 grid gap-3">
+                    {isEditing && (
+                      <div className="mt-3 grid gap-3 rounded-xl border border-white bg-white p-3">
                         <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
                           Subject
                           <input
@@ -2814,7 +2929,7 @@ export default function Dashboard() {
                         <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
                           Body
                           <textarea
-                            className="min-h-52 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 font-normal leading-6 outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                            className="min-h-48 resize-y rounded-xl border border-slate-300 bg-white px-3 py-2 font-normal leading-6 outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
                             onChange={(event) =>
                               setEmailDraftForm((current) => ({
                                 ...current,
@@ -2826,7 +2941,7 @@ export default function Dashboard() {
                         </label>
                         <div className="flex flex-wrap gap-2">
                           <button
-                            className="h-10 rounded-xl bg-[#071b33] px-4 text-sm font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                            className="h-9 rounded-lg bg-[#071b33] px-3 text-xs font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
                             disabled={isUpdating}
                             onClick={() => void handleSaveDraft(draft.id)}
                             type="button"
@@ -2834,73 +2949,51 @@ export default function Dashboard() {
                             {isUpdating ? "Saving..." : "Save edits"}
                           </button>
                           <button
-                            className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
+                            className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
                             onClick={() => setEditingDraftId(null)}
                             type="button"
                           >
                             Cancel
                           </button>
+                          <button
+                            className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
+                            disabled={isUpdating || draft.status === "approved"}
+                            onClick={() =>
+                              void handleDraftStatusAction(
+                                draft.id,
+                                "approve_draft",
+                              )
+                            }
+                            type="button"
+                          >
+                            Approve Draft
+                          </button>
+                          <button
+                            className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                            disabled={isUpdating || draft.status === "skipped"}
+                            onClick={() =>
+                              void handleDraftStatusAction(draft.id, "skip_draft")
+                            }
+                            type="button"
+                          >
+                            Skip
+                          </button>
                         </div>
                       </div>
-                    ) : (
-                      <div className="mt-4 rounded-xl border border-white bg-white p-4">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Subject
-                        </p>
-                        <p className="mt-1 font-semibold text-slate-950">
-                          {draft.subject}
-                        </p>
-                        <p className="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Body
-                        </p>
-                        <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">
-                          {draft.body}
-                        </p>
-                      </div>
                     )}
-
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <button
-                        className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
-                        disabled={isUpdating}
-                        onClick={() =>
-                          isEditing
-                            ? setEditingDraftId(null)
-                            : handleEditDraft(draft)
-                        }
-                        type="button"
-                      >
-                        {isEditing ? "Close editor" : "Edit"}
-                      </button>
-                      <button
-                        className="h-10 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
-                        disabled={isUpdating || draft.status === "approved"}
-                        onClick={() =>
-                          void handleDraftStatusAction(draft.id, "approve_draft")
-                        }
-                        type="button"
-                      >
-                        {isUpdating ? "Updating..." : "Approve Draft"}
-                      </button>
-                      <button
-                        className="h-10 rounded-xl border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-                        disabled={isUpdating || draft.status === "skipped"}
-                        onClick={() =>
-                          void handleDraftStatusAction(draft.id, "skip_draft")
-                        }
-                        type="button"
-                      >
-                        Skip
-                      </button>
-                    </div>
                   </div>
                 );
               })
+              ) : (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
+                  No drafts match this filter.
+                </div>
+              )
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
                 Generate today&apos;s send plan, then generate today&apos;s
-                drafts. Drafts will appear here for review before any future
-                sending step.
+                drafts. Drafts will appear here for review. Nothing sends
+                automatically.
               </div>
             )}
           </div>
@@ -3077,77 +3170,6 @@ export default function Dashboard() {
                 Email 3.
               </div>
             )}
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-violet-100 bg-violet-50/70 p-5 shadow-[0_18px_52px_rgba(76,29,149,0.08)]">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-950">
-                What to do next
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">
-                Follow the workflow from HubSpot sync to a reviewed draft path.
-              </p>
-            </div>
-          </div>
-          <div className="mt-4 grid gap-3 lg:grid-cols-6">
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                1. Sync HubSpot
-              </span>
-              <p className="mt-1">
-                {hubSpotStatus.lastSyncAt
-                  ? `Last sync: ${formatDateTime(hubSpotStatus.lastSyncAt)}.`
-                  : "Refresh HubSpot before planning today."}
-              </p>
-            </div>
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                2. Confirm campaign
-              </span>
-              <p className="mt-1">
-                {hasStarterCampaign
-                  ? "Starter campaign and message steps are ready."
-                  : "Create the starter campaign before enrolling contacts."}
-              </p>
-            </div>
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                3. Enroll contacts
-              </span>
-              <p className="mt-1">
-                {hasEnrolledContacts
-                  ? `${dailySendPlan.diagnostics.enrolledContactCount} contacts are enrolled.`
-                  : "Enroll eligible HubSpot contacts into the campaign."}
-              </p>
-            </div>
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                4. Generate send plan
-              </span>
-              <p className="mt-1">
-                {dailySendPlan.summary.totalScheduled > 0
-                  ? `${dailySendPlan.summary.totalScheduled} contacts are scheduled for review.`
-                  : "Generate today's plan when setup is ready."}
-              </p>
-            </div>
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                5. Generate drafts
-              </span>
-              <p className="mt-1">
-                Next phase: create draft emails from the approved message steps.
-              </p>
-            </div>
-            <div className="rounded-xl border border-white bg-white p-4 text-sm text-slate-700 shadow-sm">
-              <span className="font-semibold text-slate-950">
-                6. Review / approve / skip
-              </span>
-              <p className="mt-1">
-                Sending stays off until a later approved-email phase.
-              </p>
-            </div>
           </div>
         </section>
 
@@ -3367,17 +3389,20 @@ export default function Dashboard() {
         </>
         )}
 
-        <section className="flex flex-col gap-4 rounded-lg border border-slate-200/80 bg-white/60 p-4 shadow-[0_12px_34px_rgba(15,23,42,0.06)]">
-          <div className="flex flex-wrap items-center gap-2">
+        <section className="flex flex-col gap-3 border-t border-slate-300/70 pt-3">
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="font-semibold text-slate-500">
+              Secondary tools
+            </span>
             <button
-              className="h-10 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700"
+              className="font-semibold text-slate-600 transition hover:text-cyan-700"
               onClick={() => setShowContacts((current) => !current)}
               type="button"
             >
               {showContacts ? "Hide Contacts Preview" : "View Contacts Preview"}
             </button>
             <button
-              className="h-10 rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700"
+              className="font-semibold text-slate-600 transition hover:text-cyan-700"
               onClick={() => setShowCampaigns((current) => !current)}
               type="button"
             >
