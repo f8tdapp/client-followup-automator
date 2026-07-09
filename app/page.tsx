@@ -871,6 +871,9 @@ export default function Dashboard() {
   const [editingCampaignStepId, setEditingCampaignStepId] = useState<
     string | null
   >(null);
+  const [expandedCampaignStepId, setExpandedCampaignStepId] = useState<
+    string | null
+  >(null);
   const [campaignStepForm, setCampaignStepForm] = useState<CampaignStepForm>({
     subject_template: "",
     body_template: "",
@@ -1968,6 +1971,7 @@ export default function Dashboard() {
   }
 
   function handleEditCampaignStep(step: CampaignStep) {
+    setExpandedCampaignStepId(step.id);
     setEditingCampaignStepId(step.id);
     setCampaignStepForm({
       subject_template: step.subject_template,
@@ -3076,40 +3080,68 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="mt-4 grid gap-3 lg:grid-cols-3">
+          <div className="mt-4 grid gap-3">
             {activeCampaignSteps.length > 0 ? (
               activeCampaignSteps.map((step) => {
                 const isEditing = editingCampaignStepId === step.id;
+                const isExpanded = expandedCampaignStepId === step.id || isEditing;
 
                 return (
                   <div
-                    className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                    className="rounded-xl border border-slate-200 bg-slate-50 p-3"
                     key={step.id}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-slate-950">
-                          Email {step.step_number}
-                        </p>
-                        <p className="mt-1 text-xs font-medium uppercase tracking-wide text-slate-500">
-                          Delay: {step.delay_days} days
-                        </p>
+                    <div className="grid gap-3 lg:grid-cols-[150px_minmax(0,1fr)_auto] lg:items-center">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-slate-950">
+                            Email {step.step_number}
+                          </p>
+                          <span className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600">
+                            Delay: {step.delay_days} days
+                          </span>
+                        </div>
                       </div>
-                      <button
-                        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
-                        onClick={() =>
-                          isEditing
-                            ? setEditingCampaignStepId(null)
-                            : handleEditCampaignStep(step)
-                        }
-                        type="button"
-                      >
-                        {isEditing ? "Cancel" : "Edit"}
-                      </button>
+
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-slate-950">
+                          {step.subject_template || "No subject yet"}
+                        </p>
+                        {!isExpanded && (
+                          <p className="mt-1 truncate text-sm text-slate-600">
+                            {getDraftBodyPreview(step.body_template)}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-2 lg:justify-end">
+                        <button
+                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
+                          onClick={() =>
+                            setExpandedCampaignStepId((current) =>
+                              current === step.id ? null : step.id,
+                            )
+                          }
+                          type="button"
+                        >
+                          {isExpanded && !isEditing ? "Hide message" : "View message"}
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
+                          onClick={() =>
+                            isEditing
+                              ? setEditingCampaignStepId(null)
+                              : handleEditCampaignStep(step)
+                          }
+                          type="button"
+                        >
+                          {isEditing ? "Cancel" : "Edit"}
+                        </button>
+                      </div>
                     </div>
 
                     {isEditing ? (
-                      <div className="mt-4 flex flex-col gap-3">
+                      <div className="mt-3 flex flex-col gap-3 rounded-xl border border-white bg-white p-3">
                         <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
                           Subject
                           <input
@@ -3137,7 +3169,7 @@ export default function Dashboard() {
                           />
                         </label>
                         <button
-                          className="h-10 rounded-xl bg-[#071b33] px-4 text-sm font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                          className="h-9 self-start rounded-lg bg-[#071b33] px-3 text-xs font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
                           disabled={isSavingCampaignStep}
                           onClick={() => void handleSaveCampaignStep(step)}
                           type="button"
@@ -3145,8 +3177,8 @@ export default function Dashboard() {
                           {isSavingCampaignStep ? "Saving..." : "Save step"}
                         </button>
                       </div>
-                    ) : (
-                      <div className="mt-4">
+                    ) : isExpanded ? (
+                      <div className="mt-3 rounded-xl border border-white bg-white p-3">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                           Subject
                         </p>
@@ -3160,7 +3192,7 @@ export default function Dashboard() {
                           {step.body_template || "No body copy yet"}
                         </p>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 );
               })
