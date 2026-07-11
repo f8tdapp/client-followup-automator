@@ -247,6 +247,8 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
     currentOperation = "generate_today.build_rows";
     const brokerDomainCounts = new Map(existingScheduled.brokerDomainCounts);
     const campaignCounts = new Map(existingScheduled.campaignCounts);
+    const existingScheduleKeys = new Set(existingScheduled.existingScheduleKeys);
+    let skippedAlreadyScheduled = 0;
     currentOperation = "generate_today.compute_domain_limits";
     const domainLimits = await getBrokerDomainLimits();
 
@@ -301,6 +303,23 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
           continue;
         }
 
+        const scheduleKey = getScheduleConflictKey({
+          contactId: contact.id,
+          campaignId: campaign.id,
+          campaignStepId: step.id,
+          scheduledDate: date,
+        });
+
+        if (existingScheduleKeys.has(scheduleKey)) {
+          skippedAlreadyScheduled += 1;
+          console.info("[campaign-schedule] skipped because already scheduled", {
+            operation: "generate_today.build_rows",
+            scheduledDate: date,
+            skippedAlreadyScheduled,
+          });
+          continue;
+        }
+
         const brokerDomain = getBrokerDomain(contact);
         const safety = getSafetyStatus(
           contact,
@@ -321,6 +340,7 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
             reason: safety.reason,
             safetyStatus: safety.safetyStatus,
           });
+          existingScheduleKeys.add(scheduleKey);
           await rollEnrollmentForward(enrollment.id, date, 1);
           continue;
         }
@@ -339,6 +359,7 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
             reason: "Campaign daily send limit reached.",
             safetyStatus: "campaign_limit_reached",
           });
+          existingScheduleKeys.add(scheduleKey);
           await rollEnrollmentForward(enrollment.id, date, 1);
           continue;
         }
@@ -361,6 +382,7 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
             reason: "Broker domain daily limit reached.",
             safetyStatus: "broker_domain_limit_reached",
           });
+          existingScheduleKeys.add(scheduleKey);
           await rollEnrollmentForward(enrollment.id, date, 1);
           continue;
         }
@@ -376,10 +398,18 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
           reason: `Ready for Email ${step.step_number}.`,
           safetyStatus: "safe",
         });
+        existingScheduleKeys.add(scheduleKey);
         brokerDomainCounts.set(brokerDomain, brokerCount + 1);
         campaignCounts.set(campaign.id, campaignCount + 1);
       }
     }
+
+    console.info("[campaign-schedule] existing schedule guard summary", {
+      operation: "generate_today.build_rows",
+      scheduledDate: date,
+      skippedAlreadyScheduled,
+      existingScheduleKeyCount: existingScheduleKeys.size,
+    });
 
     currentOperation = "generate_today.compute_domain_limits";
     await runNamedScheduleOperation(
@@ -459,6 +489,7 @@ export async function getDailySendPlan(date = getTodayDate()) {
   }
   logScheduleOperationSuccess("daily_send_schedule.select_today", {
     rowCount: data?.length ?? 0,
+    statusCounts: countRowsByStatus(data ?? []),
   });
 
   const rows = await enrichDailySendScheduleRows(data ?? []);
@@ -1577,6 +1608,10 @@ function getZeroScheduleReason({
     return "No campaign steps exist yet. Add Email 1, Email 2, and Email 3 before generating today's plan.";
   }
 
+  if (scheduleRows.length > 0) {
+    return "No new contacts are due today. Existing scheduled contacts/drafts are shown below.";
+  }
+
   if (eligibleContactCount === 0) {
     return "No eligible contacts today. Contacts may be missing email, unsubscribed, recently contacted, suppressed, or blocked by domain limits.";
   }
@@ -1586,11 +1621,7 @@ function getZeroScheduleReason({
   }
 
   if (scheduleRows.some((row) => row.safety_status === "broker_domain_limit_reached")) {
-    return "No eligible contacts today. Contacts may be missing email, unsubscribed, recently contacted, suppressed, or blocked by domain limits.";
-  }
-
-  if (scheduleRows.length > 0) {
-    return "No eligible contacts today. Contacts may be missing email, unsubscribed, recently contacted, suppressed, or blocked by domain limits.";
+    return "Contacts were held for a future day because broker or company domain limits are protecting your sender reputation.";
   }
 
   return "No enrolled contacts are due today. Enrolled contacts may be waiting for their next Email 2 or Email 3 date.";
@@ -1790,6 +1821,7 @@ async function getDueEnrollments(
   logScheduleOperationSuccess("generate_today.load_enrollments", {
     campaignId,
     enrollmentCount: data?.length ?? 0,
+    eligibleEnrollmentsCount: data?.length ?? 0,
     limit,
   });
 
@@ -2036,10 +2068,18 @@ async function getExistingScheduledCounts(date: string) {
     () =>
       supabaseAdmin
         .from("daily_send_schedule")
-        .select("broker_domain,campaign_id,status")
+        .select("broker_domain,campaign_id,campaign_step_id,contact_id,scheduled_date,status")
         .eq("scheduled_date", date)
-        .eq("status", "scheduled")
-        .returns<Array<{ broker_domain: string; campaign_id: string; status: string }>>(),
+        .returns<
+          Array<{
+            broker_domain: string;
+            campaign_id: string;
+            campaign_step_id: string;
+            contact_id: string;
+            scheduled_date: string;
+            status: string;
+          }>
+        >(),
   );
 
   if (error) {
@@ -2052,8 +2092,22 @@ async function getExistingScheduledCounts(date: string) {
 
   const brokerDomainCounts = new Map<string, number>();
   const campaignCounts = new Map<string, number>();
+  const existingScheduleKeys = new Set<string>();
 
   for (const row of data ?? []) {
+    existingScheduleKeys.add(
+      getScheduleConflictKey({
+        contactId: row.contact_id,
+        campaignId: row.campaign_id,
+        campaignStepId: row.campaign_step_id,
+        scheduledDate: row.scheduled_date,
+      }),
+    );
+
+    if (row.status !== "scheduled") {
+      continue;
+    }
+
     brokerDomainCounts.set(
       row.broker_domain,
       (brokerDomainCounts.get(row.broker_domain) ?? 0) + 1,
@@ -2062,9 +2116,28 @@ async function getExistingScheduledCounts(date: string) {
   }
   logScheduleOperationSuccess("generate_today.load_existing_schedule", {
     rowCount: data?.length ?? 0,
+    scheduledRowCount: Array.from(campaignCounts.values()).reduce(
+      (total, count) => total + count,
+      0,
+    ),
+    existingScheduleKeyCount: existingScheduleKeys.size,
   });
 
-  return { brokerDomainCounts, campaignCounts };
+  return { brokerDomainCounts, campaignCounts, existingScheduleKeys };
+}
+
+function getScheduleConflictKey({
+  contactId,
+  campaignId,
+  campaignStepId,
+  scheduledDate,
+}: {
+  contactId: string;
+  campaignId: string;
+  campaignStepId: string;
+  scheduledDate: string;
+}) {
+  return [contactId, campaignId, campaignStepId, scheduledDate].join("|");
 }
 
 async function upsertScheduleRow(row: {
@@ -2272,6 +2345,14 @@ function normalizeDomain(value: string | null | undefined) {
 
 function countStep(rows: DailySendPlanRow[], stepNumber: number) {
   return rows.filter((row) => row.campaign_steps?.step_number === stepNumber).length;
+}
+
+function countRowsByStatus(rows: Array<{ status: string }>) {
+  return rows.reduce<Record<string, number>>((counts, row) => {
+    counts[row.status] = (counts[row.status] ?? 0) + 1;
+
+    return counts;
+  }, {});
 }
 
 function getDueEnrollmentLimit(campaignDailyLimit: number) {

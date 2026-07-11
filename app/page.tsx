@@ -191,6 +191,14 @@ type EmailDraftResponse = {
   details?: string;
 };
 
+type RecommendedNextStep = {
+  title: string;
+  reason: string;
+  actionLabel?: string;
+  action?: (() => void) | (() => Promise<void>);
+  progressStep: "hubspot" | "plan" | "drafts" | "review" | "sent" | "complete";
+};
+
 type EmailTemplate = {
   id: string;
   campaign_id: string | null;
@@ -941,6 +949,7 @@ export default function Dashboard() {
   const templatePanelRef = useRef<HTMLFormElement>(null);
   const heroRef = useRef<HTMLElement>(null);
   const sendPlanRef = useRef<HTMLElement>(null);
+  const draftReviewRef = useRef<HTMLElement>(null);
   const campaignPreviewRef = useRef<HTMLElement>(null);
   const contactsPreviewRef = useRef<HTMLDivElement>(null);
   const messagePlansRef = useRef<HTMLDivElement>(null);
@@ -1051,7 +1060,10 @@ export default function Dashboard() {
       : clients.length,
     eligibleContacts: dailySendPlan.diagnostics.eligibleContactCount,
     enrolledContacts: dailySendPlan.diagnostics.enrolledContactCount,
-    scheduledToday: dailySendPlan.summary.totalScheduled,
+    scheduledToday: Math.max(
+      dailySendPlan.summary.totalScheduled,
+      emailDraftSummary.totalDrafts,
+    ),
     protectedContacts:
       dailySendPlan.summary.skippedDueToDomainLimits +
       (dailySendPlan.diagnostics.suppressionRulesCount ?? 0),
@@ -1075,6 +1087,10 @@ export default function Dashboard() {
     dailySendPlan.summary.totalScheduled,
     scheduledSendRows.length,
   );
+  const todayWorkflowCount = Math.max(
+    scheduledDraftContactCount,
+    emailDraftSummary.totalDrafts,
+  );
   const visibleScheduledSendRows = showAllScheduledContacts
     ? scheduledSendRows
     : scheduledSendRows.slice(0, 5);
@@ -1085,8 +1101,149 @@ export default function Dashboard() {
     needsReview: dailyDrafts.filter((draft) => draft.status === "draft").length,
     approved: dailyDrafts.filter((draft) => draft.status === "approved").length,
     skipped: dailyDrafts.filter((draft) => draft.status === "skipped").length,
+    manuallySent: dailyDrafts.filter((draft) => draft.status === "manually_sent")
+      .length,
     total: dailyDrafts.length,
   };
+  const hubSpotIsConnected =
+    hubSpotStatus.status === "connected" ||
+    hubSpotStatus.status === "private_token";
+  const recommendedNextStep: RecommendedNextStep = !hubSpotIsConnected
+    ? {
+        title: "Connect HubSpot",
+        reason:
+          "PipelineCue needs your HubSpot contacts before it can build a follow-up plan.",
+        actionLabel: "Connect HubSpot",
+        action: handleConnectHubSpot,
+        progressStep: "hubspot",
+      }
+    : healthMetrics.totalContacts === 0
+      ? {
+          title: "Sync HubSpot",
+          reason:
+            "Bring your contacts into PipelineCue so today's plan can be built.",
+          actionLabel: "Sync HubSpot",
+          action: () => void handleHubSpotSync(),
+          progressStep: "hubspot",
+        }
+      : !hasStarterCampaign
+        ? {
+            title: "Create starter campaign",
+            reason:
+              "PipelineCue needs Email 1, Email 2, and Email 3 before it can schedule follow-ups.",
+            actionLabel: "Create starter campaign",
+            action: () =>
+              void handleCampaignScheduleAction("create_starter_campaign"),
+            progressStep: "plan",
+          }
+        : !hasEnrolledContacts
+          ? {
+              title: "Enroll eligible contacts",
+              reason: "Add safe contacts to the follow-up campaign.",
+              actionLabel: "Enroll contacts",
+              action: () =>
+                void handleCampaignScheduleAction("enroll_eligible_contacts"),
+              progressStep: "plan",
+            }
+          : scheduledDraftContactCount === 0 && emailDraftSummary.totalDrafts === 0
+            ? {
+                title: "Generate today's send plan",
+                reason:
+                  "PipelineCue will choose today's contacts while protecting company and broker domains.",
+                actionLabel: "Generate Today",
+                action: handleGenerateDailySchedule,
+                progressStep: "plan",
+              }
+            : emailDraftSummary.totalDrafts === 0
+              ? {
+                  title: "Generate today's drafts",
+                  reason:
+                    "Prepare emails for today's scheduled contacts. Nothing sends automatically.",
+                  actionLabel: "Generate Today's Drafts",
+                  action: () => void handleGenerateDraftsPreview(),
+                  progressStep: "drafts",
+                }
+              : draftStatusCounts.needsReview > 0
+                ? {
+                    title: "Review today's drafts",
+                    reason:
+                      "Approve the drafts you want to use and skip the ones you do not.",
+                    actionLabel: "Review drafts",
+                    action: () => scrollToElement(draftReviewRef),
+                    progressStep: "review",
+                  }
+                : draftStatusCounts.approved > 0
+                  ? {
+                      title:
+                        "Send approved emails manually, then mark them sent",
+                      reason:
+                        "Send it yourself from listingmediact.com, then mark it manually sent.",
+                      actionLabel: "View approved drafts",
+                      action: () => scrollToElement(draftReviewRef),
+                      progressStep: "sent",
+                    }
+                  : {
+                      title: "Today's workflow is complete",
+                      reason:
+                        "PipelineCue will surface the next follow-ups when they become due.",
+                      progressStep: "complete",
+                    };
+  const workflowSteps = [
+    {
+      label: "HubSpot synced",
+      state: hubSpotIsConnected && healthMetrics.totalContacts > 0
+        ? "Complete"
+        : recommendedNextStep.progressStep === "hubspot"
+          ? "Current"
+          : "Pending",
+    },
+    {
+      label: "Send plan",
+      state: todayWorkflowCount > 0
+        ? "Complete"
+        : recommendedNextStep.progressStep === "plan"
+          ? "Current"
+          : "Pending",
+    },
+    {
+      label: "Drafts",
+      state: emailDraftSummary.totalDrafts > 0
+        ? "Complete"
+        : recommendedNextStep.progressStep === "drafts"
+          ? "Current"
+          : "Pending",
+    },
+    {
+      label: "Review",
+      state: emailDraftSummary.totalDrafts > 0 && draftStatusCounts.needsReview === 0
+        ? "Complete"
+        : recommendedNextStep.progressStep === "review"
+          ? "Current"
+          : "Pending",
+    },
+    {
+      label: "Manually sent",
+      state:
+        emailDraftSummary.totalDrafts > 0 &&
+        (draftStatusCounts.manuallySent > 0 ||
+          draftStatusCounts.skipped + draftStatusCounts.manuallySent ===
+            emailDraftSummary.totalDrafts)
+          ? "Complete"
+          : recommendedNextStep.progressStep === "sent"
+            ? "Current"
+            : "Pending",
+    },
+  ];
+  const recommendationIsBusy =
+    (recommendedNextStep.actionLabel === "Sync HubSpot" && isSyncingHubSpot) ||
+    (recommendedNextStep.actionLabel === "Create starter campaign" &&
+      isCreatingStarterCampaign) ||
+    (recommendedNextStep.actionLabel === "Enroll contacts" &&
+      isEnrollingContacts) ||
+    (recommendedNextStep.actionLabel === "Generate Today" &&
+      isGeneratingSchedule) ||
+    (recommendedNextStep.actionLabel === "Generate Today's Drafts" &&
+      isGeneratingDrafts);
   const activeDraftFilter =
     draftStatusCounts.needsReview > 0 || draftFilter !== "needs_review"
       ? draftFilter
@@ -1109,8 +1266,10 @@ export default function Dashboard() {
     return draft.status === activeDraftFilter;
   });
   const scheduleEmptyReason =
-    dailySendPlan.diagnostics.reason ??
-    "Generate today's plan after syncing HubSpot and activating a message plan.";
+    dailySendPlan.summary.totalScheduled === 0 && emailDraftSummary.totalDrafts > 0
+      ? "Today's send plan has already been generated. Continue reviewing drafts below."
+      : dailySendPlan.diagnostics.reason ??
+        "Generate today's plan after syncing HubSpot and activating a message plan.";
 
   const filteredClients = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -1290,11 +1449,14 @@ export default function Dashboard() {
       }
 
       setDailySendPlan(body);
-      await loadTodayDrafts();
+      const draftBody = await loadTodayDrafts();
       setMessage(
         body.summary.totalScheduled > 0
           ? `Today's send plan is ready. ${body.summary.totalScheduled} contacts are scheduled for review.`
-          : body.diagnostics.reason || "Today's send plan has no scheduled contacts yet.",
+          : draftBody.summary.totalDrafts > 0
+            ? "Today's send plan has already been generated. Continue reviewing drafts below."
+            : body.diagnostics.reason ||
+              "Today's send plan has no scheduled contacts yet.",
       );
     } catch (scheduleError) {
       setError(
@@ -1320,6 +1482,8 @@ export default function Dashboard() {
     }
 
     applyEmailDraftResponse(body);
+
+    return body;
   }
 
   async function handleCampaignScheduleAction(
@@ -2311,14 +2475,14 @@ export default function Dashboard() {
           <div>
             <div className="flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-xl bg-emerald-400 text-base font-bold text-[#071b33]">
-                MA
+                PC
               </div>
               <div>
                 <p className="text-sm font-semibold text-white">
-                  Marketing Assistant AI
+                  PipelineCue
                 </p>
                 <p className="mt-0.5 text-xs text-cyan-100/70">
-                  HubSpot-first daily workflow
+                  HubSpot-first daily follow-up assistant
                 </p>
               </div>
             </div>
@@ -2400,8 +2564,7 @@ export default function Dashboard() {
           <div className="mt-5 rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
             <p className="font-semibold text-white">Tip</p>
             <p className="mt-1 text-cyan-50/80">
-              Work top to bottom: sync HubSpot, confirm the campaign, generate
-              today&apos;s plan, then review.
+              Check Recommended Next Step when you want the next useful action.
             </p>
           </div>
         </aside>
@@ -2410,11 +2573,10 @@ export default function Dashboard() {
         <header className="flex flex-col justify-between gap-3 border-b border-slate-300/70 pb-4 lg:flex-row lg:items-end">
           <div>
             <h1 className="text-2xl font-semibold text-slate-950">
-              Marketing Assistant AI
+              PipelineCue
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              HubSpot stays the source of truth. This assistant builds a
-              domain-safe daily outreach schedule for review.
+              HubSpot-first daily follow-up assistant
             </p>
           </div>
         </header>
@@ -2444,8 +2606,8 @@ export default function Dashboard() {
                 {"Good morning - today's send plan is ready."}
               </h2>
               <p className="mt-1.5 max-w-2xl text-sm leading-6 text-cyan-50/85">
-                {dailySendPlan.summary.totalScheduled} contacts scheduled.
-                Broker domains are protected. Nothing sends automatically.
+                {todayWorkflowCount} items in today&apos;s workflow. Broker
+                domains are protected. Nothing sends automatically.
               </p>
               <p className="mt-1.5 text-xs text-cyan-100/80">
                 HubSpot status: {getHubSpotStatusLabel(hubSpotStatus.status)}.
@@ -2495,6 +2657,50 @@ export default function Dashboard() {
           )}
         </section>
 
+        <section className="rounded-2xl border border-cyan-100 bg-white p-4 shadow-[0_14px_42px_rgba(15,23,42,0.08)]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                Recommended next step
+              </p>
+              <h2 className="mt-1 text-lg font-semibold text-slate-950">
+                {recommendedNextStep.title}
+              </h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+                {recommendedNextStep.reason}
+              </p>
+            </div>
+            {recommendedNextStep.action && recommendedNextStep.actionLabel && (
+              <button
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={recommendationIsBusy}
+                onClick={() => void recommendedNextStep.action?.()}
+                type="button"
+              >
+                {recommendationIsBusy ? "Working..." : recommendedNextStep.actionLabel}
+              </button>
+            )}
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {workflowSteps.map((step) => (
+              <div
+                className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-bold ${
+                  step.state === "Complete"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : step.state === "Current"
+                      ? "border-cyan-300 bg-cyan-50 text-cyan-800"
+                      : "border-slate-200 bg-slate-50 text-slate-500"
+                }`}
+                key={step.label}
+              >
+                <span>{step.label}</span>
+                <span className="font-semibold">{step.state}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <section className="rounded-2xl border border-white bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.10)]">
           <div className="mb-4">
             <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
@@ -2524,7 +2730,7 @@ export default function Dashboard() {
               </p>
             </div>
             <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 shadow-sm">
-              <p className="text-sm text-slate-500">Scheduled today</p>
+              <p className="text-sm text-slate-500">Today&apos;s workflow</p>
               <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.scheduledToday}
               </p>
@@ -2610,10 +2816,10 @@ export default function Dashboard() {
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                Scheduled
+                Today&apos;s workflow
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {dailySendPlan.summary.totalScheduled}
+                {todayWorkflowCount}
               </p>
             </div>
             <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
@@ -2824,7 +3030,10 @@ export default function Dashboard() {
           )}
         </section>
 
-        <section className="rounded-2xl border border-blue-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]">
+        <section
+          className="scroll-mt-5 rounded-2xl border border-blue-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]"
+          ref={draftReviewRef}
+        >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
