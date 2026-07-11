@@ -2585,18 +2585,6 @@ export default function Dashboard() {
               >
                 {isGeneratingSchedule ? "Generating..." : "Generate Today"}
               </button>
-              <button
-                className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
-                disabled={
-                  isGeneratingDrafts || dailySendPlan.summary.totalScheduled === 0
-                }
-                onClick={() => void handleGenerateDraftsPreview()}
-                type="button"
-              >
-                {isGeneratingDrafts
-                  ? "Generating Drafts..."
-                  : "Generate Today's Drafts"}
-              </button>
             </div>
           </div>
 
@@ -2714,6 +2702,10 @@ export default function Dashboard() {
                     {scheduledSendRows.length} scheduled contacts.
                   </p>
                 )}
+                <p className="mt-1 text-xs font-medium text-cyan-700">
+                  After reviewing today&apos;s scheduled contacts, generate
+                  drafts in Draft Review.
+                </p>
               </div>
               {scheduledSendRows.length > 5 && (
                 <button
@@ -3159,8 +3151,8 @@ export default function Dashboard() {
               )
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
-                Generate today&apos;s send plan, then generate today&apos;s
-                drafts. Drafts will appear here for review. Nothing sends
+                No drafts yet. Click Generate Today&apos;s Drafts to prepare
+                emails for today&apos;s scheduled contacts. Nothing sends
                 automatically.
               </div>
             )}

@@ -10,6 +10,13 @@ import {
 } from "@/lib/email-drafts";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+const requiredRuntimeEnv = [
+  "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+] as const;
 
 const allowedActions = [
   "generate_today_drafts",
@@ -38,6 +45,8 @@ type EmailDraftBody =
 
 export async function GET() {
   try {
+    assertEmailDraftRuntimeEnv();
+
     return Response.json(await listTodayDrafts());
   } catch (draftError) {
     return handleDraftError(draftError, "list_today_drafts");
@@ -84,6 +93,8 @@ export async function POST(request: Request) {
       method: request.method,
       routeBranch,
     });
+
+    assertEmailDraftRuntimeEnv();
 
     const result = await runEmailDraftAction(action, body);
 
@@ -170,7 +181,42 @@ async function runEmailDraftAction(
   return skipDraft(body.draftId ?? "");
 }
 
+class EmailDraftRuntimeConfigError extends Error {
+  envName: string;
+
+  constructor(envName: string) {
+    super(`Missing ${envName}`);
+    this.name = "EmailDraftRuntimeConfigError";
+    this.envName = envName;
+  }
+}
+
+function assertEmailDraftRuntimeEnv() {
+  for (const envName of requiredRuntimeEnv) {
+    if (!process.env[envName]?.trim()) {
+      throw new EmailDraftRuntimeConfigError(envName);
+    }
+  }
+}
+
 function handleDraftError(draftError: unknown, routeBranch: string) {
+  if (draftError instanceof EmailDraftRuntimeConfigError) {
+    console.error("[email-drafts] runtime configuration error", {
+      routeBranch,
+      error: draftError.message,
+      missingEnv: draftError.envName,
+    });
+
+    return Response.json(
+      {
+        ok: false,
+        error: draftError.message,
+        missingEnv: draftError.envName,
+      },
+      { status: 500 },
+    );
+  }
+
   const operation =
     draftError instanceof EmailDraftOperationError
       ? draftError.operation
@@ -189,6 +235,7 @@ function handleDraftError(draftError: unknown, routeBranch: string) {
   console.error("[email-drafts] server error", {
     routeBranch,
     operation,
+    errorName: draftError instanceof Error ? draftError.name : "UnknownError",
     error: details,
     supabaseError: supabaseError
       ? {
