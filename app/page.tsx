@@ -143,8 +143,13 @@ type CampaignStep = {
   status: string;
 };
 
-type EmailDraftStatus = "draft" | "approved" | "skipped";
-type EmailDraftFilter = "needs_review" | "approved" | "skipped" | "all";
+type EmailDraftStatus = "draft" | "approved" | "skipped" | "manually_sent";
+type EmailDraftFilter =
+  | "needs_review"
+  | "approved"
+  | "skipped"
+  | "manually_sent"
+  | "all";
 
 type EmailDraft = {
   id: string;
@@ -162,6 +167,8 @@ type EmailDraft = {
   status: EmailDraftStatus;
   approved_at: string | null;
   skipped_at: string | null;
+  manually_sent_at: string | null;
+  manually_sent_note: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -340,6 +347,7 @@ const emptyEmailDraftSummary: EmailDraftSummary = {
 const draftFilters: Array<{ label: string; value: EmailDraftFilter }> = [
   { label: "Needs review", value: "needs_review" },
   { label: "Approved", value: "approved" },
+  { label: "Manually sent", value: "manually_sent" },
   { label: "Skipped", value: "skipped" },
   { label: "All", value: "all" },
 ];
@@ -680,6 +688,10 @@ function getDraftContactName(draft: EmailDraft) {
 }
 
 function getDraftStatusLabel(status: EmailDraftStatus) {
+  if (status === "manually_sent") {
+    return "Manually Sent";
+  }
+
   if (status === "approved") {
     return "Approved draft";
   }
@@ -692,6 +704,10 @@ function getDraftStatusLabel(status: EmailDraftStatus) {
 }
 
 function getDraftStatusClasses(status: EmailDraftStatus) {
+  if (status === "manually_sent") {
+    return "border-indigo-200 bg-indigo-50 text-indigo-800";
+  }
+
   if (status === "approved") {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
@@ -715,6 +731,15 @@ function getDraftBodyPreview(body: string) {
   }
 
   return firstLine.length > 140 ? `${firstLine.slice(0, 137)}...` : firstLine;
+}
+
+function getFullDraftText(draft: EmailDraft) {
+  return [
+    `To: ${draft.contact_email}`,
+    `Subject: ${draft.subject}`,
+    "",
+    draft.body,
+  ].join("\n");
 }
 
 function parseCsv(text: string) {
@@ -896,6 +921,7 @@ export default function Dashboard() {
   >(null);
   const [showMoreActions, setShowMoreActions] = useState(false);
   const [showDailyWorkflow, setShowDailyWorkflow] = useState(false);
+  const [showAdminTools, setShowAdminTools] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
   const [showCampaigns, setShowCampaigns] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState<string | null>(
@@ -2142,6 +2168,53 @@ export default function Dashboard() {
     setUpdatingDraftId(null);
   }
 
+  async function handleMarkManuallySent(draftId: string) {
+    setError("");
+    setMessage("");
+    setUpdatingDraftId(draftId);
+
+    try {
+      const response = await fetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "mark_manually_sent",
+          draftId,
+          note: "Recorded from Manual Send Mode.",
+        }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to mark draft manually sent.");
+      }
+
+      applyEmailDraftResponse(body);
+      setMessage(
+        body.message ||
+          "Manual send recorded. Campaign progress was updated. Nothing was sent by the app.",
+      );
+    } catch (draftError) {
+      setError(getErrorMessage(draftError, "Unable to mark draft manually sent."));
+    }
+
+    setUpdatingDraftId(null);
+  }
+
+  async function handleCopyDraftText(label: string, value: string) {
+    setError("");
+    setMessage("");
+
+    try {
+      await navigator.clipboard.writeText(value);
+      setMessage(`${label} copied. Nothing was sent.`);
+    } catch (copyError) {
+      setError(getErrorMessage(copyError, `Unable to copy ${label.toLowerCase()}.`));
+    }
+  }
+
   function scrollToElement(ref: { current: HTMLElement | null }) {
     window.setTimeout(() => {
       ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2149,6 +2222,7 @@ export default function Dashboard() {
   }
 
   function openContactsPreview() {
+    setShowAdminTools(true);
     setShowContacts(true);
     scrollToElement(contactsPreviewRef);
   }
@@ -2184,6 +2258,8 @@ export default function Dashboard() {
   }
 
   function openActionPanel(panel: "client" | "csv" | "campaign" | "template") {
+    setShowAdminTools(true);
+
     if (panel === "campaign" || panel === "template") {
       setShowCampaigns(true);
     }
@@ -2264,7 +2340,7 @@ export default function Dashboard() {
                 onClick={() => setShowMoreActions((current) => !current)}
                 type="button"
               >
-                Developer / Manual Tools
+                Developer / Admin Tools
               </button>
               {showMoreActions && (
                 <div className="ml-2 grid gap-1 border-l border-white/10 pl-3">
@@ -2754,9 +2830,12 @@ export default function Dashboard() {
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
                 These drafts are generated from your campaign templates and
-                scheduled contacts. Review and approve them before any future
-                sending step. Nothing sends automatically. Approve Draft does
-                not send.
+                scheduled contacts. Review and approve them before Manual Send
+                Mode. Nothing sends automatically. Approve Draft does not send.
+              </p>
+              <p className="mt-1 text-xs font-medium text-slate-500">
+                Use Mark Manually Sent after you send the email yourself from
+                your own email account. This records progress only.
               </p>
             </div>
             <button
@@ -2861,6 +2940,11 @@ export default function Dashboard() {
                             {draft.contact_company}
                           </p>
                         )}
+                        {draft.manually_sent_at && (
+                          <p className="mt-1 text-xs font-semibold text-indigo-700">
+                            Sent manually: {formatDateTime(draft.manually_sent_at)}
+                          </p>
+                        )}
                       </div>
 
                       <div className="min-w-0 rounded-lg border border-white bg-white p-3">
@@ -2881,6 +2965,48 @@ export default function Dashboard() {
 
                       <div className="flex flex-wrap gap-2 lg:justify-end">
                         <button
+                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+                          onClick={() =>
+                            void handleCopyDraftText(
+                              "Recipient",
+                              draft.contact_email,
+                            )
+                          }
+                          type="button"
+                        >
+                          Copy recipient
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+                          onClick={() =>
+                            void handleCopyDraftText("Subject", draft.subject)
+                          }
+                          type="button"
+                        >
+                          Copy subject
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+                          onClick={() =>
+                            void handleCopyDraftText("Body", draft.body)
+                          }
+                          type="button"
+                        >
+                          Copy body
+                        </button>
+                        <button
+                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+                          onClick={() =>
+                            void handleCopyDraftText(
+                              "Full draft",
+                              getFullDraftText(draft),
+                            )
+                          }
+                          type="button"
+                        >
+                          Copy full draft
+                        </button>
+                        <button
                           className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
                           disabled={isUpdating}
                           onClick={() =>
@@ -2894,7 +3020,12 @@ export default function Dashboard() {
                         </button>
                         <button
                           className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
-                          disabled={isUpdating || draft.status === "approved"}
+                          disabled={
+                            isUpdating ||
+                            draft.status === "approved" ||
+                            draft.status === "manually_sent" ||
+                            draft.status === "skipped"
+                          }
                           onClick={() =>
                             void handleDraftStatusAction(draft.id, "approve_draft")
                           }
@@ -2902,9 +3033,23 @@ export default function Dashboard() {
                         >
                           {isUpdating ? "Updating..." : "Approve Draft"}
                         </button>
+                        {draft.status === "approved" && (
+                          <button
+                            className="h-9 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
+                            disabled={isUpdating}
+                            onClick={() => void handleMarkManuallySent(draft.id)}
+                            type="button"
+                          >
+                            Mark Manually Sent
+                          </button>
+                        )}
                         <button
                           className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-                          disabled={isUpdating || draft.status === "skipped"}
+                          disabled={
+                            isUpdating ||
+                            draft.status === "skipped" ||
+                            draft.status === "manually_sent"
+                          }
                           onClick={() =>
                             void handleDraftStatusAction(draft.id, "skip_draft")
                           }
@@ -2961,7 +3106,12 @@ export default function Dashboard() {
                           </button>
                           <button
                             className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
-                            disabled={isUpdating || draft.status === "approved"}
+                            disabled={
+                              isUpdating ||
+                              draft.status === "approved" ||
+                              draft.status === "manually_sent" ||
+                              draft.status === "skipped"
+                            }
                             onClick={() =>
                               void handleDraftStatusAction(
                                 draft.id,
@@ -2972,9 +3122,23 @@ export default function Dashboard() {
                           >
                             Approve Draft
                           </button>
+                          {draft.status === "approved" && (
+                            <button
+                              className="h-9 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
+                              disabled={isUpdating}
+                              onClick={() => void handleMarkManuallySent(draft.id)}
+                              type="button"
+                            >
+                              Mark Manually Sent
+                            </button>
+                          )}
                           <button
                             className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-                            disabled={isUpdating || draft.status === "skipped"}
+                            disabled={
+                              isUpdating ||
+                              draft.status === "skipped" ||
+                              draft.status === "manually_sent"
+                            }
                             onClick={() =>
                               void handleDraftStatusAction(draft.id, "skip_draft")
                             }
@@ -3423,9 +3587,23 @@ export default function Dashboard() {
 
         <section className="flex flex-col gap-3 border-t border-slate-300/70 pt-3">
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="font-semibold text-slate-500">
-              Secondary tools
+            <button
+              className="font-semibold text-slate-600 transition hover:text-cyan-700"
+              onClick={() => setShowAdminTools((current) => !current)}
+              type="button"
+            >
+              {showAdminTools
+                ? "Hide Developer / Admin Tools"
+                : "Developer / Admin Tools"}
+            </button>
+            <span className="text-xs text-slate-500">
+              Debug contacts and legacy message plan tools.
             </span>
+          </div>
+
+          {showAdminTools && (
+          <>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
             <button
               className="font-semibold text-slate-600 transition hover:text-cyan-700"
               onClick={() => setShowContacts((current) => !current)}
@@ -4190,6 +4368,8 @@ export default function Dashboard() {
           </aside>
           )}
             </div>
+          )}
+          </>
           )}
         </section>
         </div>

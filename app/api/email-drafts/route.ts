@@ -4,6 +4,7 @@ import {
   formatDraftSupabaseError,
   generateTodayDrafts,
   listTodayDrafts,
+  markManuallySent,
   skipDraft,
   updateDraft,
 } from "@/lib/email-drafts";
@@ -16,6 +17,7 @@ const allowedActions = [
   "update_draft",
   "approve_draft",
   "skip_draft",
+  "mark_manually_sent",
 ] as const;
 
 type EmailDraftAction = (typeof allowedActions)[number];
@@ -26,6 +28,7 @@ type EmailDraftBody =
       draftId?: string;
       subject?: string;
       body?: string;
+      note?: string;
       parseError: null;
     }
   | {
@@ -103,6 +106,7 @@ async function readEmailDraftBody(request: Request): Promise<EmailDraftBody> {
       draftId?: unknown;
       subject?: unknown;
       body?: unknown;
+      note?: unknown;
     };
 
     return {
@@ -113,6 +117,7 @@ async function readEmailDraftBody(request: Request): Promise<EmailDraftBody> {
       draftId: typeof body.draftId === "string" ? body.draftId : undefined,
       subject: typeof body.subject === "string" ? body.subject : undefined,
       body: typeof body.body === "string" ? body.body : undefined,
+      note: typeof body.note === "string" ? body.note : undefined,
       parseError: null,
     };
   } catch {
@@ -153,6 +158,13 @@ async function runEmailDraftAction(
 
   if (action === "approve_draft") {
     return approveDraft(body.draftId ?? "");
+  }
+
+  if (action === "mark_manually_sent") {
+    return markManuallySent({
+      draftId: body.draftId ?? "",
+      note: body.note,
+    });
   }
 
   return skipDraft(body.draftId ?? "");
@@ -222,6 +234,10 @@ function getDraftRouteError(routeBranch: string) {
 
   if (routeBranch === "skip_draft") {
     return "Skip draft failed";
+  }
+
+  if (routeBranch === "mark_manually_sent") {
+    return "Mark manually sent failed";
   }
 
   return "Email drafts server error";
