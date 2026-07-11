@@ -1613,7 +1613,7 @@ function getZeroScheduleReason({
   }
 
   if (eligibleContactCount === 0) {
-    return "No eligible contacts today. Contacts may be missing email, unsubscribed, recently contacted, suppressed, or blocked by domain limits.";
+    return "No new contacts are ready today. Contacts may be protected, recently contacted, or held for a future day.";
   }
 
   if (enrolledContactCount === 0) {

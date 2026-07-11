@@ -2606,8 +2606,8 @@ export default function Dashboard() {
                 {"Good morning - today's send plan is ready."}
               </h2>
               <p className="mt-1.5 max-w-2xl text-sm leading-6 text-cyan-50/85">
-                {todayWorkflowCount} items in today&apos;s workflow. Broker
-                domains are protected. Nothing sends automatically.
+                {todayWorkflowCount} items for today. Broker domains are
+                protected. Nothing sends automatically.
               </p>
               <p className="mt-1.5 text-xs text-cyan-100/80">
                 HubSpot status: {getHubSpotStatusLabel(hubSpotStatus.status)}.
@@ -2730,7 +2730,7 @@ export default function Dashboard() {
               </p>
             </div>
             <div className="rounded-xl border border-blue-100 bg-blue-50 p-4 shadow-sm">
-              <p className="text-sm text-slate-500">Today&apos;s workflow</p>
+              <p className="text-sm text-slate-500">Today&apos;s items</p>
               <p className="mt-2 text-3xl font-semibold text-slate-950">
                 {healthMetrics.scheduledToday}
               </p>
@@ -2757,8 +2757,8 @@ export default function Dashboard() {
                 Today&apos;s Send Plan
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                Today&apos;s list is ready for review. Nothing sends
-                automatically.
+                Today&apos;s scheduled contacts are ready. Draft review happens
+                below. Nothing sends automatically.
               </p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:max-w-[44rem] lg:justify-end">
@@ -2816,7 +2816,7 @@ export default function Dashboard() {
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                Today&apos;s workflow
+                Today&apos;s items
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
                 {todayWorkflowCount}
@@ -2913,7 +2913,7 @@ export default function Dashboard() {
             <div className="flex flex-col gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm font-semibold text-slate-950">
-                  Contacts ready for review
+                  Today&apos;s scheduled contacts
                 </p>
                 {scheduledSendRows.length > 0 && (
                   <p className="mt-0.5 text-xs text-slate-500">
