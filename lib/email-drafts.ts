@@ -133,12 +133,23 @@ export async function generateTodayDrafts(date = getTodayDate()) {
   const scheduledRows = await loadTodayScheduledRows(date);
   const scheduleIds = scheduledRows.map((row) => row.id);
   const existingDrafts = await loadDraftsByScheduleIds(scheduleIds);
+  console.info("[email-drafts] today schedule/draft state", {
+    operation: "email_drafts.generate_today",
+    scheduledDate: date,
+    scheduledRowsFound: scheduledRows.length,
+    existingDraftsFound: existingDrafts.length,
+  });
   const existingScheduleIds = new Set(
     existingDrafts.map((draft) => draft.schedule_id),
   );
   const missingRows = scheduledRows.filter(
     (row) => !existingScheduleIds.has(row.id),
   );
+  console.info("[email-drafts] missing drafts to generate", {
+    operation: "email_drafts.generate_today",
+    scheduledDate: date,
+    missingScheduleRows: missingRows.length,
+  });
 
   const contactIds = unique(missingRows.map((row) => row.contact_id));
   const stepIds = unique(missingRows.map((row) => row.campaign_step_id));
@@ -218,9 +229,16 @@ export async function listTodayDrafts(date = getTodayDate()): Promise<EmailDraft
     "scheduled",
     "drafted",
     "reviewed",
+    "skipped",
   ]);
   const scheduleIds = scheduledRows.map((row) => row.id);
   const drafts = await loadDraftsByScheduleIds(scheduleIds);
+  console.info("[email-drafts] today drafts found", {
+    operation: "email_drafts.list_today",
+    scheduledDate: date,
+    scheduledRowsFound: scheduledRows.length,
+    existingDraftsFound: drafts.length,
+  });
   const sortedDrafts = drafts.sort((left, right) => {
     const leftStep = left.step_number ?? 0;
     const rightStep = right.step_number ?? 0;
@@ -289,7 +307,7 @@ export async function approveDraft(draftId: string) {
     status: "approved",
     approved_at: new Date().toISOString(),
     skipped_at: null,
-    message: "Draft approved for a future sending step. Nothing was sent.",
+    message: "Draft approved for manual send. Nothing was sent.",
     operation: "email_drafts.approve",
   });
 }
@@ -300,7 +318,7 @@ export async function skipDraft(draftId: string) {
     status: "skipped",
     approved_at: null,
     skipped_at: new Date().toISOString(),
-    message: "Draft skipped. Nothing was sent.",
+    message: "Draft skipped for today. Nothing was sent.",
     operation: "email_drafts.skip",
   });
 }
@@ -324,9 +342,9 @@ export async function markManuallySent({
   const sentDate = sentAtIso.slice(0, 10);
   const draft = await loadDraftById(draftId);
 
-  if (draft.status !== "approved" && draft.status !== "draft") {
+  if (draft.status !== "approved") {
     throw new EmailDraftOperationError(
-      "Only draft or approved drafts can be marked manually sent.",
+      "Only approved drafts can be marked manually sent.",
       "email_drafts.mark_manually_sent.validate",
     );
   }
@@ -452,6 +470,13 @@ async function loadTodayScheduledRows(
   if (error) {
     throw createEmailDraftError("daily_send_schedule.select_today", error);
   }
+
+  console.info("[email-drafts] scheduled rows found for today", {
+    operation: "daily_send_schedule.select_today",
+    scheduledDate: date,
+    statuses,
+    rowCount: data?.length ?? 0,
+  });
 
   return data ?? [];
 }

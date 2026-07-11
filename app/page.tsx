@@ -148,7 +148,6 @@ type EmailDraftFilter =
   | "needs_review"
   | "approved"
   | "skipped"
-  | "manually_sent"
   | "all";
 
 type EmailDraft = {
@@ -345,9 +344,8 @@ const emptyEmailDraftSummary: EmailDraftSummary = {
 };
 
 const draftFilters: Array<{ label: string; value: EmailDraftFilter }> = [
-  { label: "Needs review", value: "needs_review" },
+  { label: "Needs Review", value: "needs_review" },
   { label: "Approved", value: "approved" },
-  { label: "Manually sent", value: "manually_sent" },
   { label: "Skipped", value: "skipped" },
   { label: "All", value: "all" },
 ];
@@ -693,14 +691,30 @@ function getDraftStatusLabel(status: EmailDraftStatus) {
   }
 
   if (status === "approved") {
-    return "Approved draft";
+    return "Approved";
   }
 
   if (status === "skipped") {
     return "Skipped";
   }
 
-  return "Prepared for review";
+  return "Needs Review";
+}
+
+function getDraftFilterEmptyMessage(filter: EmailDraftFilter) {
+  if (filter === "needs_review") {
+    return "No drafts need review right now. Check Approved or Skipped to see completed items.";
+  }
+
+  if (filter === "approved") {
+    return "No drafts approved yet.";
+  }
+
+  if (filter === "skipped") {
+    return "No drafts skipped today.";
+  }
+
+  return "No drafts generated yet. Click Generate Today's Drafts.";
 }
 
 function getDraftStatusClasses(status: EmailDraftStatus) {
@@ -731,15 +745,6 @@ function getDraftBodyPreview(body: string) {
   }
 
   return firstLine.length > 140 ? `${firstLine.slice(0, 137)}...` : firstLine;
-}
-
-function getFullDraftText(draft: EmailDraft) {
-  return [
-    `To: ${draft.contact_email}`,
-    `Subject: ${draft.subject}`,
-    "",
-    draft.body,
-  ].join("\n");
 }
 
 function parseCsv(text: string) {
@@ -1066,16 +1071,32 @@ export default function Dashboard() {
   const scheduledSendRows = dailySendPlan.schedule.filter(
     (scheduleRow) => scheduleRow.status === "scheduled",
   );
+  const scheduledDraftContactCount = Math.max(
+    dailySendPlan.summary.totalScheduled,
+    scheduledSendRows.length,
+  );
   const visibleScheduledSendRows = showAllScheduledContacts
     ? scheduledSendRows
     : scheduledSendRows.slice(0, 5);
   const skippedSendRows = dailySendPlan.schedule.filter(
     (scheduleRow) => scheduleRow.status !== "scheduled",
   );
+  const draftStatusCounts = {
+    needsReview: dailyDrafts.filter((draft) => draft.status === "draft").length,
+    approved: dailyDrafts.filter((draft) => draft.status === "approved").length,
+    skipped: dailyDrafts.filter((draft) => draft.status === "skipped").length,
+    total: dailyDrafts.length,
+  };
   const activeDraftFilter =
-    emailDraftSummary.remaining > 0 || draftFilter !== "needs_review"
+    draftStatusCounts.needsReview > 0 || draftFilter !== "needs_review"
       ? draftFilter
       : "all";
+  const draftFilterCounts: Record<EmailDraftFilter, number> = {
+    needs_review: draftStatusCounts.needsReview,
+    approved: draftStatusCounts.approved,
+    skipped: draftStatusCounts.skipped,
+    all: draftStatusCounts.total,
+  };
   const filteredDrafts = dailyDrafts.filter((draft) => {
     if (activeDraftFilter === "all") {
       return true;
@@ -2083,10 +2104,10 @@ export default function Dashboard() {
 
       applyEmailDraftResponse(body);
       setMessage(
-        body.message ||
-          `${body.summary.totalDrafts} drafts are prepared for review. Nothing was sent.`,
+        `${body.summary.created} drafts generated. ${body.summary.totalDrafts} drafts are prepared for review. Nothing was sent.`,
       );
     } catch (draftError) {
+      console.error("[email-drafts] generate_today_drafts failed", draftError);
       setError(
         getErrorMessage(draftError, "Unable to generate today's drafts."),
       );
@@ -2160,7 +2181,11 @@ export default function Dashboard() {
       }
 
       applyEmailDraftResponse(body);
-      setMessage(body.message || "Draft updated. Nothing was sent.");
+      setMessage(
+        action === "approve_draft"
+          ? "Draft approved for manual send. View it under Approved."
+          : "Draft skipped for today. View it under Skipped.",
+      );
     } catch (draftError) {
       setError(getErrorMessage(draftError, "Unable to update draft status."));
     }
@@ -2182,7 +2207,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           action: "mark_manually_sent",
           draftId,
-          note: "Recorded from Manual Send Mode.",
+          note: "User manually sent from listingmediact.com.",
         }),
       });
       const body = (await response.json()) as EmailDraftResponse;
@@ -2201,18 +2226,6 @@ export default function Dashboard() {
     }
 
     setUpdatingDraftId(null);
-  }
-
-  async function handleCopyDraftText(label: string, value: string) {
-    setError("");
-    setMessage("");
-
-    try {
-      await navigator.clipboard.writeText(value);
-      setMessage(`${label} copied. Nothing was sent.`);
-    } catch (copyError) {
-      setError(getErrorMessage(copyError, `Unable to copy ${label.toLowerCase()}.`));
-    }
   }
 
   function scrollToElement(ref: { current: HTMLElement | null }) {
@@ -2821,27 +2834,44 @@ export default function Dashboard() {
                 Today&apos;s Drafts
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                These drafts are generated from your campaign templates and
-                scheduled contacts. Review and approve them before Manual Send
-                Mode. Nothing sends automatically. Approve Draft does not send.
+                Review each draft. Approve the ones you want to use, or skip
+                the ones you do not. Approval does not send anything. Nothing
+                sends automatically.
               </p>
-              <p className="mt-1 text-xs font-medium text-slate-500">
+              <p className="mt-1 max-w-2xl text-xs font-medium leading-5 text-slate-500">
                 Use Mark Manually Sent after you send the email yourself from
-                your own email account. This records progress only.
+                listingmediact.com. This records progress only. PipelineCue
+                does not send anything.
               </p>
             </div>
-            <button
-              className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
-              disabled={
-                isGeneratingDrafts || dailySendPlan.summary.totalScheduled === 0
-              }
-              onClick={() => void handleGenerateDraftsPreview()}
-              type="button"
-            >
-              {isGeneratingDrafts
-                ? "Generating Drafts..."
-                : "Generate Today's Drafts"}
-            </button>
+            <div className="shrink-0 lg:max-w-xs lg:text-right">
+              <button
+                className="h-10 cursor-pointer whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={isGeneratingDrafts || scheduledDraftContactCount === 0}
+                onClick={() => void handleGenerateDraftsPreview()}
+                type="button"
+              >
+                {isGeneratingDrafts
+                  ? "Generating drafts..."
+                  : "Generate Today's Drafts"}
+              </button>
+              {scheduledDraftContactCount === 0 &&
+              emailDraftSummary.totalDrafts > 0 ? (
+                <p className="mt-2 text-xs font-medium text-slate-500">
+                  Drafts already generated for today.
+                </p>
+              ) : scheduledDraftContactCount === 0 ? (
+                <p className="mt-2 text-xs font-medium text-slate-500">
+                  Generate today&apos;s send plan first.
+                </p>
+              ) : emailDraftSummary.totalDrafts === 0 ? (
+                <p className="mt-2 max-w-xs text-xs font-medium leading-5 text-slate-500">
+                  No drafts yet. Click Generate Today&apos;s Drafts to prepare
+                  emails for today&apos;s scheduled contacts. Nothing sends
+                  automatically.
+                </p>
+              ) : null}
+            </div>
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -2892,7 +2922,7 @@ export default function Dashboard() {
                   onClick={() => setDraftFilter(filter.value)}
                   type="button"
                 >
-                  {filter.label}
+                  {filter.label} ({draftFilterCounts[filter.value]})
                 </button>
               ))}
             </div>
@@ -2910,44 +2940,52 @@ export default function Dashboard() {
                     className="rounded-xl border border-slate-200 bg-slate-50 p-3"
                     key={draft.id}
                   >
-                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1.35fr)_auto] lg:items-start">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-semibold text-slate-950">
-                            {getDraftContactName(draft)}
+                    <div className="grid gap-3">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-semibold text-slate-950">
+                              {getDraftContactName(draft)}
+                            </p>
+                            <span
+                              className={`inline-flex whitespace-nowrap rounded-lg border px-2.5 py-1 text-xs font-bold ${getDraftStatusClasses(
+                                draft.status,
+                              )}`}
+                            >
+                              {getDraftStatusLabel(draft.status)}
+                            </span>
+                            <span className="inline-flex whitespace-nowrap rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700">
+                              Email {draft.step_number ?? 1}
+                            </span>
+                          </div>
+                          <p className="mt-1 break-all text-sm text-slate-500">
+                            {draft.contact_email}
                           </p>
-                          <span
-                            className={`rounded-lg border px-2.5 py-1 text-xs font-bold ${getDraftStatusClasses(
-                              draft.status,
-                            )}`}
-                          >
-                            {getDraftStatusLabel(draft.status)}
-                          </span>
+                          {draft.contact_company && (
+                            <p className="mt-1 text-sm text-slate-500">
+                              {draft.contact_company}
+                            </p>
+                          )}
                         </div>
-                        <p className="mt-1 text-sm text-slate-500">
-                          {draft.contact_email}
-                        </p>
-                        {draft.contact_company && (
-                          <p className="mt-1 text-sm text-slate-500">
-                            {draft.contact_company}
-                          </p>
-                        )}
-                        {draft.manually_sent_at && (
-                          <p className="mt-1 text-xs font-semibold text-indigo-700">
-                            Sent manually: {formatDateTime(draft.manually_sent_at)}
-                          </p>
-                        )}
+
+                        <div className="shrink-0 text-left sm:text-right">
+                          {draft.status === "approved" && (
+                            <p className="text-xs font-semibold text-emerald-700">
+                              Approved - ready for manual send.
+                            </p>
+                          )}
+                          {draft.manually_sent_at && (
+                            <p className="text-xs font-semibold text-indigo-700">
+                              Sent manually: {formatDateTime(draft.manually_sent_at)}
+                            </p>
+                          )}
+                        </div>
                       </div>
 
                       <div className="min-w-0 rounded-lg border border-white bg-white p-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-bold text-slate-700">
-                            Email {draft.step_number ?? 1}
-                          </span>
-                          <p className="min-w-0 font-semibold text-slate-950">
-                            {draft.subject}
-                          </p>
-                        </div>
+                        <p className="font-semibold text-slate-950">
+                          {draft.subject}
+                        </p>
                         {!isEditing && (
                           <p className="mt-2 truncate text-sm text-slate-600">
                             {getDraftBodyPreview(draft.body)}
@@ -2955,51 +2993,9 @@ export default function Dashboard() {
                         )}
                       </div>
 
-                      <div className="flex flex-wrap gap-2 lg:justify-end">
+                      <div className="flex flex-wrap gap-2">
                         <button
-                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
-                          onClick={() =>
-                            void handleCopyDraftText(
-                              "Recipient",
-                              draft.contact_email,
-                            )
-                          }
-                          type="button"
-                        >
-                          Copy recipient
-                        </button>
-                        <button
-                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
-                          onClick={() =>
-                            void handleCopyDraftText("Subject", draft.subject)
-                          }
-                          type="button"
-                        >
-                          Copy subject
-                        </button>
-                        <button
-                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
-                          onClick={() =>
-                            void handleCopyDraftText("Body", draft.body)
-                          }
-                          type="button"
-                        >
-                          Copy body
-                        </button>
-                        <button
-                          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
-                          onClick={() =>
-                            void handleCopyDraftText(
-                              "Full draft",
-                              getFullDraftText(draft),
-                            )
-                          }
-                          type="button"
-                        >
-                          Copy full draft
-                        </button>
-                        <button
-                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
+                          className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
                           disabled={isUpdating}
                           onClick={() =>
                             isEditing
@@ -3010,24 +3006,24 @@ export default function Dashboard() {
                         >
                           {isEditing ? "Close" : "Edit"}
                         </button>
-                        <button
-                          className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
-                          disabled={
-                            isUpdating ||
-                            draft.status === "approved" ||
-                            draft.status === "manually_sent" ||
-                            draft.status === "skipped"
-                          }
-                          onClick={() =>
-                            void handleDraftStatusAction(draft.id, "approve_draft")
-                          }
-                          type="button"
-                        >
-                          {isUpdating ? "Updating..." : "Approve Draft"}
-                        </button>
+                        {draft.status === "draft" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
+                            disabled={isUpdating}
+                            onClick={() =>
+                              void handleDraftStatusAction(
+                                draft.id,
+                                "approve_draft",
+                              )
+                            }
+                            type="button"
+                          >
+                            {isUpdating ? "Updating..." : "Approve"}
+                          </button>
+                        )}
                         {draft.status === "approved" && (
                           <button
-                            className="h-9 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
+                            className="whitespace-nowrap rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
                             disabled={isUpdating}
                             onClick={() => void handleMarkManuallySent(draft.id)}
                             type="button"
@@ -3035,20 +3031,21 @@ export default function Dashboard() {
                             Mark Manually Sent
                           </button>
                         )}
-                        <button
-                          className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-                          disabled={
-                            isUpdating ||
-                            draft.status === "skipped" ||
-                            draft.status === "manually_sent"
-                          }
-                          onClick={() =>
-                            void handleDraftStatusAction(draft.id, "skip_draft")
-                          }
-                          type="button"
-                        >
-                          Skip
-                        </button>
+                        {draft.status === "draft" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                            disabled={isUpdating}
+                            onClick={() =>
+                              void handleDraftStatusAction(
+                                draft.id,
+                                "skip_draft",
+                              )
+                            }
+                            type="button"
+                          >
+                            Skip
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -3082,7 +3079,7 @@ export default function Dashboard() {
                         </label>
                         <div className="flex flex-wrap gap-2">
                           <button
-                            className="h-9 rounded-lg bg-[#071b33] px-3 text-xs font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                            className="whitespace-nowrap rounded-lg bg-[#071b33] px-3 py-2 text-sm font-bold text-white transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
                             disabled={isUpdating}
                             onClick={() => void handleSaveDraft(draft.id)}
                             type="button"
@@ -3090,33 +3087,30 @@ export default function Dashboard() {
                             {isUpdating ? "Saving..." : "Save edits"}
                           </button>
                           <button
-                            className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
+                            className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700"
                             onClick={() => setEditingDraftId(null)}
                             type="button"
                           >
                             Cancel
                           </button>
-                          <button
-                            className="h-9 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
-                            disabled={
-                              isUpdating ||
-                              draft.status === "approved" ||
-                              draft.status === "manually_sent" ||
-                              draft.status === "skipped"
-                            }
-                            onClick={() =>
-                              void handleDraftStatusAction(
-                                draft.id,
-                                "approve_draft",
-                              )
+                          {draft.status === "draft" && (
+                            <button
+                              className="whitespace-nowrap rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:text-emerald-300"
+                              disabled={isUpdating}
+                              onClick={() =>
+                                void handleDraftStatusAction(
+                                  draft.id,
+                                  "approve_draft",
+                                )
                             }
                             type="button"
                           >
-                            Approve Draft
+                              Approve
                           </button>
+                        )}
                           {draft.status === "approved" && (
                             <button
-                              className="h-9 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
+                              className="whitespace-nowrap rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-bold text-indigo-800 transition hover:border-indigo-400 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:text-indigo-300"
                               disabled={isUpdating}
                               onClick={() => void handleMarkManuallySent(draft.id)}
                               type="button"
@@ -3124,20 +3118,21 @@ export default function Dashboard() {
                               Mark Manually Sent
                             </button>
                           )}
-                          <button
-                            className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
-                            disabled={
-                              isUpdating ||
-                              draft.status === "skipped" ||
-                              draft.status === "manually_sent"
-                            }
-                            onClick={() =>
-                              void handleDraftStatusAction(draft.id, "skip_draft")
-                            }
-                            type="button"
-                          >
-                            Skip
-                          </button>
+                          {draft.status === "draft" && (
+                            <button
+                              className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+                              disabled={isUpdating}
+                              onClick={() =>
+                                void handleDraftStatusAction(
+                                  draft.id,
+                                  "skip_draft",
+                                )
+                              }
+                              type="button"
+                            >
+                              Skip
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -3146,14 +3141,12 @@ export default function Dashboard() {
               })
               ) : (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
-                  No drafts match this filter.
+                  {getDraftFilterEmptyMessage(activeDraftFilter)}
                 </div>
               )
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
-                No drafts yet. Click Generate Today&apos;s Drafts to prepare
-                emails for today&apos;s scheduled contacts. Nothing sends
-                automatically.
+                {getDraftFilterEmptyMessage("all")} Nothing sends automatically.
               </div>
             )}
           </div>
