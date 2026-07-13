@@ -191,6 +191,41 @@ type EmailDraftResponse = {
   details?: string;
 };
 
+type SendingSettings = {
+  id: string;
+  provider: string;
+  sending_domain: string;
+  from_name: string;
+  from_email: string;
+  reply_to_email: string;
+  daily_send_limit: number;
+  sending_enabled: boolean;
+  test_mode_only: boolean;
+  domain_verified: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type SendingSettingsForm = {
+  provider: string;
+  sending_domain: string;
+  from_name: string;
+  from_email: string;
+  reply_to_email: string;
+  daily_send_limit: string;
+  sending_enabled: boolean;
+  test_mode_only: boolean;
+  domain_verified: boolean;
+};
+
+type SendingSettingsResponse = {
+  ok: boolean;
+  settings?: SendingSettings;
+  message?: string;
+  error?: string;
+  details?: string;
+};
+
 type RecommendedNextStep = {
   title: string;
   reason: string;
@@ -351,6 +386,18 @@ const emptyEmailDraftSummary: EmailDraftSummary = {
   remaining: 0,
 };
 
+const emptySendingSettingsForm: SendingSettingsForm = {
+  provider: "resend",
+  sending_domain: "listingmediact.com",
+  from_name: "TJ Muldoon",
+  from_email: "tj@listingmediact.com",
+  reply_to_email: "tj@listingmediact.com",
+  daily_send_limit: "25",
+  sending_enabled: false,
+  test_mode_only: true,
+  domain_verified: false,
+};
+
 const draftFilters: Array<{ label: string; value: EmailDraftFilter }> = [
   { label: "Needs Review", value: "needs_review" },
   { label: "Approved", value: "approved" },
@@ -431,6 +478,26 @@ function isHeadersOverflowMessage(message: string) {
 
 function reportError(label: string, error: unknown) {
   console.error(label, error);
+}
+
+function getSendingSettingsForm(
+  settings: SendingSettings | null,
+): SendingSettingsForm {
+  if (!settings) {
+    return emptySendingSettingsForm;
+  }
+
+  return {
+    provider: settings.provider,
+    sending_domain: settings.sending_domain,
+    from_name: settings.from_name,
+    from_email: settings.from_email,
+    reply_to_email: settings.reply_to_email,
+    daily_send_limit: String(settings.daily_send_limit),
+    sending_enabled: settings.sending_enabled,
+    test_mode_only: settings.test_mode_only,
+    domain_verified: settings.domain_verified,
+  };
 }
 
 function normalizeNumber(value: string, fallback: number) {
@@ -881,6 +948,10 @@ export default function Dashboard() {
   const [dailyDrafts, setDailyDrafts] = useState<EmailDraft[]>([]);
   const [emailDraftSummary, setEmailDraftSummary] =
     useState<EmailDraftSummary>(emptyEmailDraftSummary);
+  const [sendingSettings, setSendingSettings] =
+    useState<SendingSettings | null>(null);
+  const [sendingSettingsForm, setSendingSettingsForm] =
+    useState<SendingSettingsForm>(emptySendingSettingsForm);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignSteps, setCampaignSteps] = useState<CampaignStep[]>([]);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([]);
@@ -902,6 +973,8 @@ export default function Dashboard() {
   const [isSyncingHubSpot, setIsSyncingHubSpot] = useState(false);
   const [isGeneratingSchedule, setIsGeneratingSchedule] = useState(false);
   const [isGeneratingDrafts, setIsGeneratingDrafts] = useState(false);
+  const [isSavingSendingSettings, setIsSavingSendingSettings] =
+    useState(false);
   const [isCreatingStarterCampaign, setIsCreatingStarterCampaign] =
     useState(false);
   const [isEnrollingContacts, setIsEnrollingContacts] = useState(false);
@@ -951,6 +1024,7 @@ export default function Dashboard() {
   const sendPlanRef = useRef<HTMLElement>(null);
   const draftReviewRef = useRef<HTMLElement>(null);
   const campaignPreviewRef = useRef<HTMLElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const contactsPreviewRef = useRef<HTMLDivElement>(null);
   const messagePlansRef = useRef<HTMLDivElement>(null);
   const clientFirstNameInputRef = useRef<HTMLInputElement>(null);
@@ -1329,12 +1403,14 @@ export default function Dashboard() {
         recommendationsResponse,
         scheduleResponse,
         draftsResponse,
+        sendingSettingsResponse,
       ] =
         await Promise.all([
         fetch("/api/hubspot/status"),
         fetch("/api/hubspot/recommendations"),
         fetch("/api/campaign-schedule"),
         fetch("/api/email-drafts"),
+        fetch("/api/sending-settings"),
       ]);
 
       if (statusResponse.ok) {
@@ -1365,6 +1441,16 @@ export default function Dashboard() {
         applyEmailDraftResponse(
           (await draftsResponse.json()) as EmailDraftResponse,
         );
+      }
+
+      if (sendingSettingsResponse.ok) {
+        const settingsBody =
+          (await sendingSettingsResponse.json()) as SendingSettingsResponse;
+
+        if (settingsBody.settings) {
+          setSendingSettings(settingsBody.settings);
+          setSendingSettingsForm(getSendingSettingsForm(settingsBody.settings));
+        }
       }
     } catch (hubSpotError) {
       reportError("Unable to load HubSpot dashboard data", hubSpotError);
@@ -1484,6 +1570,43 @@ export default function Dashboard() {
     applyEmailDraftResponse(body);
 
     return body;
+  }
+
+  async function handleSaveSendingSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    setIsSavingSendingSettings(true);
+
+    try {
+      const response = await fetch("/api/sending-settings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "update_settings",
+          settings: sendingSettingsForm,
+        }),
+      });
+      const body = (await response.json()) as SendingSettingsResponse;
+
+      if (!response.ok || !body.settings) {
+        throw new Error(
+          body.details || body.error || "Unable to save sending settings.",
+        );
+      }
+
+      setSendingSettings(body.settings);
+      setSendingSettingsForm(getSendingSettingsForm(body.settings));
+      setMessage(body.message || "Sending domain setup saved. No emails were sent.");
+    } catch (settingsError) {
+      setError(
+        getErrorMessage(settingsError, "Unable to save sending settings."),
+      );
+    }
+
+    setIsSavingSendingSettings(false);
   }
 
   async function handleCampaignScheduleAction(
@@ -1660,11 +1783,13 @@ export default function Dashboard() {
             recommendationsResponse,
             scheduleResponse,
             draftsResponse,
+            sendingSettingsResponse,
           ] = await Promise.all([
             fetch("/api/hubspot/status"),
             fetch("/api/hubspot/recommendations"),
             fetch("/api/campaign-schedule"),
             fetch("/api/email-drafts"),
+            fetch("/api/sending-settings"),
           ]);
 
           if (!isActive) {
@@ -1702,6 +1827,18 @@ export default function Dashboard() {
 
             setDailyDrafts(draftsBody.drafts ?? []);
             setEmailDraftSummary(draftsBody.summary ?? emptyEmailDraftSummary);
+          }
+
+          if (sendingSettingsResponse.ok) {
+            const settingsBody =
+              (await sendingSettingsResponse.json()) as SendingSettingsResponse;
+
+            if (settingsBody.settings) {
+              setSendingSettings(settingsBody.settings);
+              setSendingSettingsForm(
+                getSendingSettingsForm(settingsBody.settings),
+              );
+            }
           }
         } catch (hubSpotError) {
           reportError("Unable to load HubSpot dashboard data", hubSpotError);
@@ -2425,7 +2562,14 @@ export default function Dashboard() {
       return;
     }
 
-    if (item === "HubSpot Sync" || item === "Settings") {
+    if (item === "Settings") {
+      setShowMoreActions(true);
+      setShowAdminTools(true);
+      scrollToElement(settingsRef);
+      return;
+    }
+
+    if (item === "HubSpot Sync") {
       handleHubSpotSyncPreview();
       scrollToElement(heroRef);
       return;
@@ -3814,6 +3958,204 @@ export default function Dashboard() {
                 ? "Hide Message Plans"
                 : "Manage Message Plans"}
             </button>
+          </div>
+
+          <div
+            className="scroll-mt-6 rounded-lg border border-white bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
+            ref={settingsRef}
+          >
+            <div className="flex flex-col gap-4 border-b border-slate-200 pb-5 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                  Settings
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-slate-950">
+                  Sending Domain Setup
+                </h2>
+                <p className="mt-1 max-w-3xl text-sm text-slate-500">
+                  PipelineCue will not send contact emails until sending is
+                  explicitly enabled in a later phase. Use listingmediact.com as
+                  the sending domain only after SPF/DKIM/DMARC are verified.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <span
+                  className={`inline-flex whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-semibold ${
+                    sendingSettings?.domain_verified
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-amber-100 text-amber-800"
+                  }`}
+                >
+                  Domain:{" "}
+                  {sendingSettings?.domain_verified ? "Verified" : "Not verified"}
+                </span>
+                <span className="inline-flex whitespace-nowrap rounded-md bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                  Sending enabled:{" "}
+                  {sendingSettings?.sending_enabled ? "On" : "Off"}
+                </span>
+                <span className="inline-flex whitespace-nowrap rounded-md bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-800">
+                  Test mode: {sendingSettings?.test_mode_only ? "On" : "Off"}
+                </span>
+              </div>
+            </div>
+
+            <form
+              className="mt-5 grid gap-4"
+              onSubmit={handleSaveSendingSettings}
+            >
+              <div className="grid gap-4 lg:grid-cols-3">
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  Provider
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        provider: event.target.value,
+                      }))
+                    }
+                    value={sendingSettingsForm.provider}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  Sending domain
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        sending_domain: event.target.value,
+                      }))
+                    }
+                    value={sendingSettingsForm.sending_domain}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  Daily send limit
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    min={1}
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        daily_send_limit: event.target.value,
+                      }))
+                    }
+                    type="number"
+                    value={sendingSettingsForm.daily_send_limit}
+                  />
+                </label>
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-3">
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  From name
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        from_name: event.target.value,
+                      }))
+                    }
+                    value={sendingSettingsForm.from_name}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  From email
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        from_email: event.target.value,
+                      }))
+                    }
+                    type="email"
+                    value={sendingSettingsForm.from_email}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                  Reply-to email
+                  <input
+                    className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        reply_to_email: event.target.value,
+                      }))
+                    }
+                    type="email"
+                    value={sendingSettingsForm.reply_to_email}
+                  />
+                </label>
+              </div>
+
+              <div className="grid gap-3 rounded-lg bg-slate-50 p-4 text-sm text-slate-700 lg:grid-cols-3">
+                <label className="flex items-start gap-2 font-medium">
+                  <input
+                    checked={sendingSettingsForm.domain_verified}
+                    className="mt-1"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        domain_verified: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  Domain verified
+                </label>
+                <label className="flex items-start gap-2 font-medium">
+                  <input
+                    checked={sendingSettingsForm.sending_enabled}
+                    className="mt-1"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        sending_enabled: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  Sending enabled
+                </label>
+                <label className="flex items-start gap-2 font-medium">
+                  <input
+                    checked={sendingSettingsForm.test_mode_only}
+                    className="mt-1"
+                    onChange={(event) =>
+                      setSendingSettingsForm((current) => ({
+                        ...current,
+                        test_mode_only: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  Test mode only
+                </label>
+              </div>
+
+              <div className="flex flex-col gap-3 rounded-lg border border-cyan-100 bg-cyan-50 p-4 text-sm text-cyan-950 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p>
+                    Provider API keys must be stored as server environment
+                    variables, such as RESEND_API_KEY.
+                  </p>
+                  <p className="mt-1 text-cyan-900/80">
+                    This setup screen saves domain and sender settings only. No
+                    contact email sending is available here.
+                  </p>
+                </div>
+                <button
+                  className="h-10 whitespace-nowrap rounded-md bg-slate-950 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  disabled={isSavingSendingSettings}
+                  type="submit"
+                >
+                  {isSavingSendingSettings ? "Saving..." : "Save settings"}
+                </button>
+              </div>
+            </form>
           </div>
 
           {(showContacts ||
