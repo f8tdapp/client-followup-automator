@@ -3,11 +3,19 @@ import {
   SendingSettingsError,
   upsertSendingSettings,
 } from "@/lib/sending-settings";
+import {
+  ResendProviderError,
+  sendResendTestEmail,
+} from "@/lib/resend-provider";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const allowedActions = ["get_settings", "update_settings"] as const;
+const allowedActions = [
+  "get_settings",
+  "update_settings",
+  "send_test_email",
+] as const;
 
 type SendingSettingsAction = (typeof allowedActions)[number];
 
@@ -81,6 +89,55 @@ export async function POST(request: Request) {
       });
     }
 
+    if (action === "send_test_email") {
+      const settings = await getSendingSettings();
+
+      if (!settings.domain_verified) {
+        return Response.json(
+          {
+            ok: false,
+            error: "The sending domain must be verified before a test email can be sent.",
+          },
+          { status: 400 },
+        );
+      }
+
+      if (!settings.test_mode_only) {
+        return Response.json(
+          {
+            ok: false,
+            error: "Test mode only must be enabled before a test email can be sent.",
+          },
+          { status: 400 },
+        );
+      }
+
+      const testRecipient =
+        settings.reply_to_email.trim() || settings.from_email.trim();
+
+      if (!testRecipient) {
+        return Response.json(
+          {
+            ok: false,
+            error: "Configure a reply-to or from email before sending a test email.",
+          },
+          { status: 400 },
+        );
+      }
+
+      await sendResendTestEmail({
+        fromName: settings.from_name,
+        fromEmail: settings.from_email,
+        replyToEmail: settings.reply_to_email || settings.from_email,
+        toEmail: testRecipient,
+      });
+
+      return Response.json({
+        ok: true,
+        message: `Test email sent to ${testRecipient}. No contact emails were sent.`,
+      });
+    }
+
     return Response.json({
       ok: true,
       settings: await upsertSendingSettings(body.settings ?? {}),
@@ -136,6 +193,22 @@ function normalizeSendingSettingsAction(
 }
 
 function handleSendingSettingsError(settingsError: unknown, routeBranch: string) {
+  if (settingsError instanceof ResendProviderError) {
+    console.error("[sending-settings] test email error", {
+      routeBranch,
+      code: settingsError.code,
+    });
+
+    return Response.json(
+      {
+        ok: false,
+        error: settingsError.message,
+        code: settingsError.code,
+      },
+      { status: settingsError.code === "missing_api_key" ? 503 : 502 },
+    );
+  }
+
   const operation =
     settingsError instanceof SendingSettingsError
       ? settingsError.operation

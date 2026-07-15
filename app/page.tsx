@@ -975,6 +975,9 @@ export default function Dashboard() {
   const [isGeneratingDrafts, setIsGeneratingDrafts] = useState(false);
   const [isSavingSendingSettings, setIsSavingSendingSettings] =
     useState(false);
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
+  const [testEmailMessage, setTestEmailMessage] = useState("");
+  const [testEmailError, setTestEmailError] = useState("");
   const [isCreatingStarterCampaign, setIsCreatingStarterCampaign] =
     useState(false);
   const [isEnrollingContacts, setIsEnrollingContacts] = useState(false);
@@ -1607,6 +1610,37 @@ export default function Dashboard() {
     }
 
     setIsSavingSendingSettings(false);
+  }
+
+  async function handleSendTestEmail() {
+    setTestEmailMessage("");
+    setTestEmailError("");
+    setIsSendingTestEmail(true);
+
+    try {
+      const response = await fetch("/api/sending-settings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "send_test_email" }),
+      });
+      const body = (await response.json()) as SendingSettingsResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to send the test email.");
+      }
+
+      setTestEmailMessage(
+        body.message || "Test email sent. No contact emails were sent.",
+      );
+    } catch (testEmailSendError) {
+      setTestEmailError(
+        getErrorMessage(testEmailSendError, "Unable to send the test email."),
+      );
+    }
+
+    setIsSendingTestEmail(false);
   }
 
   async function handleCampaignScheduleAction(
@@ -4147,14 +4181,42 @@ export default function Dashboard() {
                     contact email sending is available here.
                   </p>
                 </div>
-                <button
-                  className="h-10 whitespace-nowrap rounded-md bg-slate-950 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-                  disabled={isSavingSendingSettings}
-                  type="submit"
-                >
-                  {isSavingSendingSettings ? "Saving..." : "Save settings"}
-                </button>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button
+                    className="h-10 whitespace-nowrap rounded-md border border-cyan-700 bg-white px-4 text-sm font-semibold text-cyan-800 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:border-slate-300 disabled:text-slate-400"
+                    disabled={isSendingTestEmail || !sendingSettings}
+                    onClick={handleSendTestEmail}
+                    type="button"
+                  >
+                    {isSendingTestEmail
+                      ? "Sending test..."
+                      : "Send test email to myself"}
+                  </button>
+                  <button
+                    className="h-10 whitespace-nowrap rounded-md bg-slate-950 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    disabled={isSavingSendingSettings}
+                    type="submit"
+                  >
+                    {isSavingSendingSettings ? "Saving..." : "Save settings"}
+                  </button>
+                </div>
               </div>
+              {testEmailMessage && (
+                <p
+                  className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
+                  role="status"
+                >
+                  {testEmailMessage}
+                </p>
+              )}
+              {testEmailError && (
+                <p
+                  className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+                  role="alert"
+                >
+                  {testEmailError}
+                </p>
+              )}
             </form>
           </div>
 
