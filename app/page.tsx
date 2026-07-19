@@ -1001,6 +1001,7 @@ export default function Dashboard() {
   const [updatingDraftId, setUpdatingDraftId] = useState<string | null>(null);
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
+  const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
   const [draftFilter, setDraftFilter] =
     useState<EmailDraftFilter>("needs_review");
   const [importSummary, setImportSummary] =
@@ -1009,6 +1010,9 @@ export default function Dashboard() {
     "client" | "csv" | "campaign" | "template" | null
   >(null);
   const [showMoreActions, setShowMoreActions] = useState(false);
+  const [activeView, setActiveView] = useState<
+    "home" | "send-plan" | "campaigns" | "contacts" | "settings" | "advanced"
+  >("home");
   const [showDailyWorkflow, setShowDailyWorkflow] = useState(false);
   const [showAdminTools, setShowAdminTools] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
@@ -1019,6 +1023,8 @@ export default function Dashboard() {
   const [expandedCampaignId, setExpandedCampaignId] = useState<string | null>(
     null,
   );
+  const [showMessageSteps, setShowMessageSteps] = useState(false);
+  const [showSendingDomainSetup, setShowSendingDomainSetup] = useState(false);
   const clientPanelRef = useRef<HTMLFormElement>(null);
   const csvPanelRef = useRef<HTMLDivElement>(null);
   const campaignPanelRef = useRef<HTMLFormElement>(null);
@@ -1028,6 +1034,7 @@ export default function Dashboard() {
   const draftReviewRef = useRef<HTMLElement>(null);
   const campaignPreviewRef = useRef<HTMLElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const advancedToolsRef = useRef<HTMLDivElement>(null);
   const contactsPreviewRef = useRef<HTMLDivElement>(null);
   const messagePlansRef = useRef<HTMLDivElement>(null);
   const clientFirstNameInputRef = useRef<HTMLInputElement>(null);
@@ -1222,13 +1229,13 @@ export default function Dashboard() {
                 void handleCampaignScheduleAction("enroll_eligible_contacts"),
               progressStep: "plan",
             }
-          : scheduledDraftContactCount === 0 && emailDraftSummary.totalDrafts === 0
+            : scheduledDraftContactCount === 0 && emailDraftSummary.totalDrafts === 0
             ? {
                 title: "Generate today's send plan",
                 reason:
                   "PipelineCue will choose today's contacts while protecting company and broker domains.",
-                actionLabel: "Generate Today",
-                action: handleGenerateDailySchedule,
+                actionLabel: "Go to Today's Send Plan",
+                action: () => scrollToElement(sendPlanRef),
                 progressStep: "plan",
               }
             : emailDraftSummary.totalDrafts === 0
@@ -1236,13 +1243,13 @@ export default function Dashboard() {
                   title: "Generate today's drafts",
                   reason:
                     "Prepare emails for today's scheduled contacts. Nothing sends automatically.",
-                  actionLabel: "Generate Today's Drafts",
-                  action: () => void handleGenerateDraftsPreview(),
+                  actionLabel: "Go to Today's Follow-Ups",
+                  action: () => scrollToElement(draftReviewRef),
                   progressStep: "drafts",
                 }
               : draftStatusCounts.needsReview > 0
                 ? {
-                    title: "Review today's drafts",
+                    title: "Review today's follow-ups",
                     reason:
                       "Approve the drafts you want to use and skip the ones you do not.",
                     actionLabel: "Review drafts",
@@ -1316,11 +1323,7 @@ export default function Dashboard() {
     (recommendedNextStep.actionLabel === "Create starter campaign" &&
       isCreatingStarterCampaign) ||
     (recommendedNextStep.actionLabel === "Enroll contacts" &&
-      isEnrollingContacts) ||
-    (recommendedNextStep.actionLabel === "Generate Today" &&
-      isGeneratingSchedule) ||
-    (recommendedNextStep.actionLabel === "Generate Today's Drafts" &&
-      isGeneratingDrafts);
+      isEnrollingContacts);
   const activeDraftFilter =
     draftStatusCounts.needsReview > 0 || draftFilter !== "needs_review"
       ? draftFilter
@@ -2570,6 +2573,7 @@ export default function Dashboard() {
   }
 
   function openContactsPreview() {
+    setActiveView("contacts");
     setShowAdminTools(true);
     setShowContacts(true);
     scrollToElement(contactsPreviewRef);
@@ -2577,16 +2581,19 @@ export default function Dashboard() {
 
   function handleSidebarNav(item: string) {
     if (item === "Home") {
+      setActiveView("home");
       scrollToElement(heroRef);
       return;
     }
 
     if (item === "Today's Send Plan") {
+      setActiveView("send-plan");
       scrollToElement(sendPlanRef);
       return;
     }
 
     if (item === "Campaigns") {
+      setActiveView("campaigns");
       scrollToElement(campaignPreviewRef);
       return;
     }
@@ -2597,8 +2604,7 @@ export default function Dashboard() {
     }
 
     if (item === "Settings") {
-      setShowMoreActions(true);
-      setShowAdminTools(true);
+      setActiveView("settings");
       scrollToElement(settingsRef);
       return;
     }
@@ -2613,7 +2619,10 @@ export default function Dashboard() {
   }
 
   function openActionPanel(panel: "client" | "csv" | "campaign" | "template") {
+    setActiveView("advanced");
     setShowAdminTools(true);
+    setShowContacts(false);
+    setSelectedTimelineClientId("");
 
     if (panel === "campaign" || panel === "template") {
       setShowCampaigns(true);
@@ -2646,6 +2655,24 @@ export default function Dashboard() {
     }, 0);
   }
 
+  function openMessagePlans() {
+    setActiveView("advanced");
+    setShowAdminTools(true);
+    setShowContacts(false);
+    setSelectedTimelineClientId("");
+    setShowCampaigns(true);
+    scrollToElement(messagePlansRef);
+  }
+
+  function openAdvancedTools() {
+    setActiveView("advanced");
+    setShowMoreActions(true);
+    setShowAdminTools(true);
+    setShowContacts(false);
+    setSelectedTimelineClientId("");
+    scrollToElement(advancedToolsRef);
+  }
+
   return (
     <main className="min-h-screen bg-[#dfe8f3] text-slate-950">
       <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
@@ -2672,10 +2699,18 @@ export default function Dashboard() {
                 "Campaigns",
                 "Contacts",
                 "Settings",
-              ].map((item, index) => (
+              ].map((item) => {
+                const itemView =
+                  item === "Home"
+                    ? "home"
+                    : item === "Today's Send Plan"
+                      ? "send-plan"
+                      : item.toLowerCase();
+
+                return (
                 <button
                   className={`rounded-xl px-3 py-2 text-left transition ${
-                    index === 0
+                    activeView === itemView
                       ? "bg-white text-[#071b33] shadow-sm hover:bg-cyan-50"
                       : "text-cyan-50/80 hover:bg-white/10 hover:text-white"
                   }`}
@@ -2685,17 +2720,18 @@ export default function Dashboard() {
                 >
                   {item}
                 </button>
-              ))}
+                );
+              })}
               <button
                 className={`rounded-xl px-3 py-2 text-left transition ${
-                  showMoreActions
+                  activeView === "advanced"
                     ? "bg-white/15 text-white"
                     : "text-cyan-50/80 hover:bg-white/10 hover:text-white"
                 }`}
-                onClick={() => setShowMoreActions((current) => !current)}
+                onClick={openAdvancedTools}
                 type="button"
               >
-                Developer / Admin Tools
+                Advanced
               </button>
               {showMoreActions && (
                 <div className="ml-2 grid gap-1 border-l border-white/10 pl-3">
@@ -2734,6 +2770,13 @@ export default function Dashboard() {
                   >
                     HubSpot Sync
                   </button>
+                  <button
+                    className="rounded-lg px-3 py-2 text-left text-cyan-50/80 transition hover:bg-white/10 hover:text-white"
+                    onClick={openMessagePlans}
+                    type="button"
+                  >
+                    Manage Message Plans
+                  </button>
                 </div>
               )}
             </nav>
@@ -2742,7 +2785,7 @@ export default function Dashboard() {
           <div className="mt-5 rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
             <p className="font-semibold text-white">Tip</p>
             <p className="mt-1 text-cyan-50/80">
-              Check Recommended Next Step when you want the next useful action.
+              Check Next Action when you want the next useful step.
             </p>
           </div>
         </aside>
@@ -2771,6 +2814,8 @@ export default function Dashboard() {
           </div>
         )}
 
+        {(activeView === "home" || activeView === "send-plan") && (
+        <>
         <section
           className="scroll-mt-5 overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(135deg,#071b33_0%,#0b2a52_48%,#0f766e_100%)] p-4 text-white shadow-[0_14px_42px_rgba(7,27,51,0.22)]"
           ref={heroRef}
@@ -2839,7 +2884,7 @@ export default function Dashboard() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                Recommended next step
+                Next Action
               </p>
               <h2 className="mt-1 text-lg font-semibold text-slate-950">
                 {recommendedNextStep.title}
@@ -2935,8 +2980,8 @@ export default function Dashboard() {
                 Today&apos;s Send Plan
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                Today&apos;s scheduled contacts are ready. Draft review happens
-                below. Nothing sends automatically.
+                PipelineCue prepares today&apos;s schedule behind the scenes and
+                keeps the follow-up workload within your safeguards.
               </p>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap lg:max-w-[44rem] lg:justify-end">
@@ -2983,12 +3028,6 @@ export default function Dashboard() {
                 {isGeneratingSchedule ? "Generating..." : "Generate Today"}
               </button>
             </div>
-          </div>
-
-          <div className="mt-3 rounded-xl border border-cyan-100 bg-cyan-50 px-3 py-2 text-sm text-cyan-900">
-            <span className="font-semibold">Today&apos;s workflow:</span>{" "}
-            Generate send plan &rarr; Generate drafts &rarr; Review drafts
-            &rarr; Approve or skip. Nothing sends automatically.
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
@@ -3043,43 +3082,16 @@ export default function Dashboard() {
           </div>
 
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            We limit how many people from the same company or broker domain are contacted in one day. Extra contacts are rolled forward automatically.
+            PipelineCue limits sends by company/domain and rolls extras forward
+            automatically.
           </div>
 
-          <div className="mt-4 grid gap-3 text-sm md:grid-cols-4">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <span className="font-semibold text-slate-950">
-                Active campaigns
-              </span>
-              <p className="mt-1 text-slate-600">
-                {dailySendPlan.diagnostics.activeCampaignCount}
-              </p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <span className="font-semibold text-slate-950">
-                Eligible contacts
-              </span>
-              <p className="mt-1 text-slate-600">
-                {dailySendPlan.diagnostics.eligibleContactCount}
-              </p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <span className="font-semibold text-slate-950">
-                Enrolled contacts
-              </span>
-              <p className="mt-1 text-slate-600">
-                {dailySendPlan.diagnostics.enrolledContactCount}
-              </p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <span className="font-semibold text-slate-950">
-                Campaign steps
-              </span>
-              <p className="mt-1 text-slate-600">
-                {dailySendPlan.diagnostics.campaignStepCount}
-              </p>
-            </div>
-          </div>
+          {dailySendPlan.summary.skippedDueToDomainLimits > 0 && (
+            <p className="mt-3 text-sm font-medium text-amber-800">
+              {dailySendPlan.summary.skippedDueToDomainLimits}
+              {" contacts rolled forward to protect today’s send limits."}
+            </p>
+          )}
 
           {dailySendPlan.summary.totalScheduled === 0 && (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-900">
@@ -3087,6 +3099,20 @@ export default function Dashboard() {
             </div>
           )}
 
+          <button
+            aria-expanded={showSendPlanDetails}
+            className="mt-4 inline-flex cursor-pointer items-center gap-2 text-sm font-semibold text-cyan-800 transition hover:text-cyan-950"
+            onClick={() => setShowSendPlanDetails((current) => !current)}
+            type="button"
+          >
+            {showSendPlanDetails
+              ? "Hide send plan details"
+              : "View send plan details"}
+            <span aria-hidden="true">{showSendPlanDetails ? "^" : "v"}</span>
+          </button>
+
+          {showSendPlanDetails && (
+          <>
           <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200">
             <div className="flex flex-col gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -3100,8 +3126,7 @@ export default function Dashboard() {
                   </p>
                 )}
                 <p className="mt-1 text-xs font-medium text-cyan-700">
-                  After reviewing today&apos;s scheduled contacts, generate
-                  drafts in Draft Review.
+                  Generate drafts to continue in Today&apos;s Follow-Ups.
                 </p>
               </div>
               {scheduledSendRows.length > 5 && (
@@ -3206,6 +3231,8 @@ export default function Dashboard() {
               </div>
             </div>
           )}
+          </>
+          )}
         </section>
 
         <section
@@ -3215,15 +3242,15 @@ export default function Dashboard() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
-                Draft Review
+                Daily workspace
               </p>
               <h2 className="mt-1 text-xl font-semibold text-slate-950">
-                Today&apos;s Drafts
+                Today&apos;s Follow-Ups
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                Review each draft. Approve the ones you want to use, or skip
-                the ones you do not. Approval does not send anything. Nothing
-                sends automatically.
+                {emailDraftSummary.totalDrafts === 0
+                  ? "Generate today's drafts to prepare your follow-ups. Nothing sends automatically."
+                  : "Review, approve, or skip today's prepared follow-ups. Nothing sends automatically."}
               </p>
               <p className="mt-1 max-w-2xl text-xs font-medium leading-5 text-slate-500">
                 Use Mark Manually Sent after you send the email yourself from
@@ -3240,7 +3267,7 @@ export default function Dashboard() {
               >
                 {isGeneratingDrafts
                   ? "Generating drafts..."
-                  : "Generate Today's Drafts"}
+                  : "Generate today's drafts"}
               </button>
               {scheduledDraftContactCount === 0 &&
               emailDraftSummary.totalDrafts > 0 ? (
@@ -3539,18 +3566,53 @@ export default function Dashboard() {
           </div>
         </section>
 
+        </>
+        )}
+
+        {activeView === "campaigns" && (
         <section
-          className="scroll-mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.07)]"
+          className="scroll-mt-5 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_52px_rgba(15,23,42,0.07)]"
           ref={campaignPreviewRef}
         >
+          <button
+            aria-expanded={showMessageSteps}
+            className="group flex w-full cursor-pointer items-center justify-between gap-4 p-4 text-left transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5"
+            onClick={() => setShowMessageSteps((current) => !current)}
+            type="button"
+          >
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-slate-950 transition group-hover:text-cyan-800">
+                Message Steps
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {activeCampaignSteps.length} campaign {activeCampaignSteps.length === 1 ? "email" : "emails"} configured
+              </p>
+            </div>
+            <svg
+              aria-hidden="true"
+              className={`size-5 shrink-0 text-slate-500 transition-transform ${
+                showMessageSteps ? "rotate-180" : ""
+              }`}
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="m6 9 6 6 6-6"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+              />
+            </svg>
+          </button>
+
+          {showMessageSteps && (
+          <div className="border-t border-slate-200 p-4 sm:p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
                 Campaign Preview
               </p>
-              <h2 className="mt-1 text-xl font-semibold text-slate-950">
-                Message Steps
-              </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
                 These are the messages that will eventually be used for this
                 campaign. Nothing sends automatically.
@@ -3739,9 +3801,12 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+          </div>
+          )}
         </section>
+        )}
 
-        {showLegacyPreview && (
+        {activeView === "home" && showLegacyPreview && (
         <>
         <section className="rounded-3xl border border-emerald-200 bg-emerald-50/80 shadow-[0_24px_70px_rgba(16,185,129,0.16)]">
           <div className="flex flex-col gap-2 border-b border-emerald-100 bg-emerald-100/70 p-6 sm:flex-row sm:items-end sm:justify-between">
@@ -3957,82 +4022,76 @@ export default function Dashboard() {
         </>
         )}
 
-        <section className="flex flex-col gap-3 border-t border-slate-300/70 pt-3">
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <button
-              className="font-semibold text-slate-600 transition hover:text-cyan-700"
-              onClick={() => setShowAdminTools((current) => !current)}
-              type="button"
-            >
-              {showAdminTools
-                ? "Hide Developer / Admin Tools"
-                : "Developer / Admin Tools"}
-            </button>
-            <span className="text-xs text-slate-500">
-              Debug contacts and legacy message plan tools.
-            </span>
-          </div>
-
-          {showAdminTools && (
+        {(activeView === "settings" ||
+          activeView === "contacts" ||
+          activeView === "advanced") && (
+        <section className="flex flex-col gap-3">
+          {activeView === "settings" && (
           <>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <button
-              className="font-semibold text-slate-600 transition hover:text-cyan-700"
-              onClick={() => setShowContacts((current) => !current)}
-              type="button"
-            >
-              {showContacts ? "Hide Contacts Preview" : "View Contacts Preview"}
-            </button>
-            <button
-              className="font-semibold text-slate-600 transition hover:text-cyan-700"
-              onClick={() => setShowCampaigns((current) => !current)}
-              type="button"
-            >
-              {showCampaigns
-                ? "Hide Message Plans"
-                : "Manage Message Plans"}
-            </button>
+          <div className="scroll-mt-6" ref={settingsRef}>
+            <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+              Account and setup
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-950">
+              Settings
+            </h2>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+              Review your connections, sending safeguards, and company setup.
+            </p>
           </div>
 
           <div
-            className="scroll-mt-6 rounded-lg border border-white bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
-            ref={settingsRef}
+            className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
           >
-            <div className="flex flex-col gap-4 border-b border-slate-200 pb-5 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                  Settings
-                </p>
-                <h2 className="mt-1 text-lg font-semibold text-slate-950">
-                  Sending Domain Setup
+            <button
+              aria-expanded={showSendingDomainSetup}
+              className="group flex w-full cursor-pointer items-center justify-between gap-4 p-4 text-left transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5"
+              onClick={() =>
+                setShowSendingDomainSetup((current) => !current)
+              }
+              type="button"
+            >
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold text-slate-950 transition group-hover:text-cyan-800">
+                  Sending Domain
                 </h2>
-                <p className="mt-1 max-w-3xl text-sm text-slate-500">
-                  PipelineCue will not send contact emails until sending is
-                  explicitly enabled in a later phase. Use listingmediact.com as
-                  the sending domain only after SPF/DKIM/DMARC are verified.
+                <p className="mt-1 text-sm text-slate-500">
+                  Control the sender identity and email provider used for
+                  PipelineCue.
+                </p>
+                <p className="mt-1 text-xs font-medium text-slate-500">
+                  {sendingSettings?.domain_verified
+                    ? "Verified"
+                    : "Not verified"}
+                  {" \u2022 "}Test mode {sendingSettings?.test_mode_only ? "on" : "off"}
+                  {" \u2022 "}Sending {sendingSettings?.sending_enabled ? "on" : "off"}
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <span
-                  className={`inline-flex whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-semibold ${
-                    sendingSettings?.domain_verified
-                      ? "bg-emerald-100 text-emerald-800"
-                      : "bg-amber-100 text-amber-800"
-                  }`}
-                >
-                  Domain:{" "}
-                  {sendingSettings?.domain_verified ? "Verified" : "Not verified"}
-                </span>
-                <span className="inline-flex whitespace-nowrap rounded-md bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                  Sending enabled:{" "}
-                  {sendingSettings?.sending_enabled ? "On" : "Off"}
-                </span>
-                <span className="inline-flex whitespace-nowrap rounded-md bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-800">
-                  Test mode: {sendingSettings?.test_mode_only ? "On" : "Off"}
-                </span>
-              </div>
-            </div>
+              <svg
+                aria-hidden="true"
+                className={`size-5 shrink-0 text-slate-500 transition-transform ${
+                  showSendingDomainSetup ? "rotate-180" : ""
+                }`}
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="m6 9 6 6 6-6"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                />
+              </svg>
+            </button>
 
+            {showSendingDomainSetup && (
+            <div className="border-t border-slate-200 p-4 sm:p-5">
+              <p className="max-w-3xl text-sm leading-6 text-slate-500">
+                PipelineCue will not send contact emails until sending is
+                explicitly enabled in a later phase. Use listingmediact.com as
+                the sending domain only after SPF/DKIM/DMARC are verified.
+              </p>
             <form
               className="mt-5 grid gap-4"
               onSubmit={handleSaveSendingSettings}
@@ -4218,16 +4277,111 @@ export default function Dashboard() {
                 </p>
               )}
             </form>
+            </div>
+            )}
           </div>
 
-          {(showContacts ||
-            showCampaigns ||
-            openPanel === "client" ||
-            openPanel === "csv" ||
-            timelineClient) && (
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="font-semibold text-slate-950">
+                  HubSpot Connection
+                </h3>
+                <span
+                  className={`rounded-md px-2 py-1 text-xs font-semibold ${
+                    hubSpotIsConnected
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-amber-100 text-amber-800"
+                  }`}
+                >
+                  {hubSpotIsConnected ? "Connected" : "Not connected"}
+                </span>
+              </div>
+              <p className="mt-2 text-sm leading-5 text-slate-500">
+                Contact sync and connection status for your HubSpot account.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="font-semibold text-slate-950">Safety Limits</h3>
+              <p className="mt-2 text-sm text-slate-700">
+                Daily send limit: {sendingSettings?.daily_send_limit ?? "Not set"}
+              </p>
+              <p className="mt-1 text-sm leading-5 text-slate-500">
+                Sending remains governed by the configured account safeguards.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="font-semibold text-slate-950">Company Profile</h3>
+              <p className="mt-2 truncate text-sm text-slate-700">
+                {sendingSettings?.from_name || "Company name not set"}
+              </p>
+              <p className="mt-1 truncate text-sm text-slate-500">
+                {sendingSettings?.sending_domain || "Sending domain not set"}
+              </p>
+            </div>
+          </div>
+          </>
+          )}
+
+          {activeView === "contacts" && (
+            <div className="scroll-mt-6" ref={advancedToolsRef}>
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                Contact data
+              </p>
+              <h2 className="mt-1 text-xl font-semibold text-slate-950">
+                Contacts
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Search the synced contact preview and review contact timelines.
+              </p>
+            </div>
+          )}
+
+          {activeView === "advanced" && (
+          <div
+            className="scroll-mt-6 flex flex-wrap items-center gap-3 pt-1 text-sm"
+            ref={advancedToolsRef}
+          >
+            <button
+              className="font-semibold text-slate-600 transition hover:text-cyan-700"
+              onClick={() => setShowAdminTools((current) => !current)}
+              type="button"
+            >
+              {showAdminTools ? "Hide Advanced" : "Advanced"}
+            </button>
+            <span className="text-xs text-slate-500">
+              Debug utilities and legacy message plan tools.
+            </span>
+          </div>
+          )}
+
+          {showAdminTools &&
+          (activeView === "advanced" || activeView === "contacts") && (
+          <>
+          {activeView === "advanced" && (
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <button
+              className="font-semibold text-slate-600 transition hover:text-cyan-700"
+              onClick={() => setShowCampaigns((current) => !current)}
+              type="button"
+            >
+              {showCampaigns
+                ? "Hide Message Plans"
+                : "Manage Message Plans"}
+            </button>
+          </div>
+          )}
+
+          {((activeView === "contacts" && (showContacts || timelineClient)) ||
+            (activeView === "advanced" &&
+              (showCampaigns ||
+                openPanel === "client" ||
+                openPanel === "csv"))) && (
             <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
               <div className="flex min-w-0 flex-col gap-6">
-                {showContacts && (
+                {activeView === "contacts" && showContacts && (
             <div
               className="scroll-mt-6 rounded-lg border border-white bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
               ref={contactsPreviewRef}
@@ -4355,7 +4509,7 @@ export default function Dashboard() {
             </div>
                 )}
 
-                {showCampaigns && (
+                {activeView === "advanced" && showCampaigns && (
             <div
               className="scroll-mt-6 rounded-lg border border-white bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
               ref={messagePlansRef}
@@ -4719,7 +4873,9 @@ export default function Dashboard() {
                 )}
           </div>
 
-          {(openPanel === "client" || openPanel === "csv" || timelineClient) && (
+          {((activeView === "advanced" &&
+            (openPanel === "client" || openPanel === "csv")) ||
+            (activeView === "contacts" && timelineClient)) && (
           <aside className="flex flex-col gap-6">
             {(openPanel === "client" || openPanel === "csv") && (
             <div className="rounded-md border border-slate-200 bg-white p-5 shadow-sm">
@@ -4915,7 +5071,7 @@ export default function Dashboard() {
             </div>
             )}
 
-            {timelineClient && (
+            {activeView === "contacts" && timelineClient && (
             <div className="rounded-md border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -4970,6 +5126,7 @@ export default function Dashboard() {
           </>
           )}
         </section>
+        )}
         </div>
       </div>
     </main>
