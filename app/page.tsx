@@ -8,6 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  EmailProvider,
+  getEmailComposeUrl,
+  getFullEmailText,
+} from "@/lib/email-compose";
 
 type Client = {
   id: string;
@@ -194,6 +199,7 @@ type EmailDraftResponse = {
 type SendingSettings = {
   id: string;
   provider: string;
+  preferred_email_provider: PreferredEmailProvider;
   sending_domain: string;
   from_name: string;
   from_email: string;
@@ -208,6 +214,7 @@ type SendingSettings = {
 
 type SendingSettingsForm = {
   provider: string;
+  preferred_email_provider: PreferredEmailProvider;
   sending_domain: string;
   from_name: string;
   from_email: string;
@@ -217,6 +224,8 @@ type SendingSettingsForm = {
   test_mode_only: boolean;
   domain_verified: boolean;
 };
+
+type PreferredEmailProvider = "gmail" | "outlook" | "other";
 
 type SendingSettingsResponse = {
   ok: boolean;
@@ -388,6 +397,7 @@ const emptyEmailDraftSummary: EmailDraftSummary = {
 
 const emptySendingSettingsForm: SendingSettingsForm = {
   provider: "resend",
+  preferred_email_provider: "other",
   sending_domain: "listingmediact.com",
   from_name: "TJ Muldoon",
   from_email: "tj@listingmediact.com",
@@ -489,6 +499,7 @@ function getSendingSettingsForm(
 
   return {
     provider: settings.provider,
+    preferred_email_provider: settings.preferred_email_provider,
     sending_domain: settings.sending_domain,
     from_name: settings.from_name,
     from_email: settings.from_email,
@@ -1578,8 +1589,7 @@ export default function Dashboard() {
     return body;
   }
 
-  async function handleSaveSendingSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function saveSendingSettings() {
     setError("");
     setMessage("");
     setIsSavingSendingSettings(true);
@@ -1605,7 +1615,7 @@ export default function Dashboard() {
 
       setSendingSettings(body.settings);
       setSendingSettingsForm(getSendingSettingsForm(body.settings));
-      setMessage(body.message || "Sending domain setup saved. No emails were sent.");
+      setMessage(body.message || "Settings saved. No emails were sent.");
     } catch (settingsError) {
       setError(
         getErrorMessage(settingsError, "Unable to save sending settings."),
@@ -1613,6 +1623,11 @@ export default function Dashboard() {
     }
 
     setIsSavingSendingSettings(false);
+  }
+
+  function handleSaveSendingSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void saveSendingSettings();
   }
 
   async function handleSendTestEmail() {
@@ -2531,6 +2546,33 @@ export default function Dashboard() {
     setUpdatingDraftId(null);
   }
 
+  function handleOpenEmailDraft(
+    provider: Exclude<EmailProvider, "other">,
+    draft: EmailDraft,
+  ) {
+    window.open(
+      getEmailComposeUrl(provider, draft),
+      "_blank",
+      "noopener,noreferrer",
+    );
+  }
+
+  async function handleCopyFullEmail(draft: EmailDraft) {
+    setError("");
+    setMessage("");
+
+    const fullEmail = getFullEmailText(draft);
+
+    try {
+      await navigator.clipboard.writeText(fullEmail);
+      setMessage("Full email copied to clipboard. Nothing was sent.");
+    } catch (clipboardError) {
+      setError(
+        getErrorMessage(clipboardError, "Unable to copy the email to clipboard."),
+      );
+    }
+  }
+
   async function handleMarkManuallySent(draftId: string) {
     setError("");
     setMessage("");
@@ -3407,6 +3449,13 @@ export default function Dashboard() {
                         )}
                       </div>
 
+                      {draft.status === "approved" && !isEditing && (
+                        <p className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-sm leading-5 text-emerald-900">
+                          Open the draft in your email provider, send it, then
+                          mark it sent here.
+                        </p>
+                      )}
+
                       <div className="flex flex-wrap gap-2">
                         <button
                           className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
@@ -3433,6 +3482,43 @@ export default function Dashboard() {
                             type="button"
                           >
                             {isUpdating ? "Updating..." : "Approve"}
+                          </button>
+                        )}
+                        {draft.status === "approved" &&
+                          !isEditing &&
+                          sendingSettings?.preferred_email_provider ===
+                            "gmail" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg bg-[#071b33] px-3 py-2 text-sm font-bold text-white transition hover:bg-[#0b2a52]"
+                            onClick={() => handleOpenEmailDraft("gmail", draft)}
+                            type="button"
+                          >
+                            Open in Gmail
+                          </button>
+                        )}
+                        {draft.status === "approved" &&
+                          !isEditing &&
+                          sendingSettings?.preferred_email_provider ===
+                            "outlook" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg bg-[#071b33] px-3 py-2 text-sm font-bold text-white transition hover:bg-[#0b2a52]"
+                            onClick={() => handleOpenEmailDraft("outlook", draft)}
+                            type="button"
+                          >
+                            Open in Outlook
+                          </button>
+                        )}
+                        {draft.status === "approved" && !isEditing && (
+                          <button
+                            className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-bold transition ${
+                              sendingSettings?.preferred_email_provider === "other"
+                                ? "bg-[#071b33] text-white hover:bg-[#0b2a52]"
+                                : "border border-cyan-200 bg-white text-cyan-800 hover:border-cyan-500 hover:bg-cyan-50"
+                            }`}
+                            onClick={() => void handleCopyFullEmail(draft)}
+                            type="button"
+                          >
+                            Copy full email
                           </button>
                         )}
                         {draft.status === "approved" && (
@@ -4043,6 +4129,38 @@ export default function Dashboard() {
           <div
             className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
           >
+            <div className="border-b border-slate-200 p-4 sm:p-5">
+              <label className="flex max-w-xl flex-col gap-1.5 text-sm font-medium text-slate-700">
+                Preferred email app
+                <select
+                  className="h-10 rounded-md border border-slate-300 bg-white px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                  onChange={(event) =>
+                    setSendingSettingsForm((current) => ({
+                      ...current,
+                      preferred_email_provider: event.target
+                        .value as PreferredEmailProvider,
+                    }))
+                  }
+                  value={sendingSettingsForm.preferred_email_provider}
+                >
+                  <option value="gmail">Gmail / Google Workspace</option>
+                  <option value="outlook">Outlook / Microsoft 365</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                Choose the email app you use for manual sending. PipelineCue
+                will prepare the draft, but you still send it yourself.
+              </p>
+              <button
+                className="mt-3 h-10 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={isSavingSendingSettings}
+                onClick={() => void saveSendingSettings()}
+                type="button"
+              >
+                {isSavingSendingSettings ? "Saving..." : "Save preference"}
+              </button>
+            </div>
             <button
               aria-expanded={showSendingDomainSetup}
               className="group flex w-full cursor-pointer items-center justify-between gap-4 p-4 text-left transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5"

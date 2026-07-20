@@ -141,7 +141,7 @@ export async function POST(request: Request) {
     return Response.json({
       ok: true,
       settings: await upsertSendingSettings(body.settings ?? {}),
-      message: "Sending domain setup saved. No emails were sent.",
+      message: "Settings saved. No emails were sent.",
     });
   } catch (settingsError) {
     return handleSendingSettingsError(settingsError, routeBranch);

@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 export type SendingSettings = {
   id: string;
   provider: string;
+  preferred_email_provider: PreferredEmailProvider;
   sending_domain: string;
   from_name: string;
   from_email: string;
@@ -17,6 +18,7 @@ export type SendingSettings = {
 
 export type SendingSettingsInput = Partial<{
   provider: string;
+  preferred_email_provider: PreferredEmailProvider;
   sending_domain: string;
   from_name: string;
   from_email: string;
@@ -27,8 +29,11 @@ export type SendingSettingsInput = Partial<{
   domain_verified: boolean;
 }>;
 
+export type PreferredEmailProvider = "gmail" | "outlook" | "other";
+
 const defaultSendingSettings = {
   provider: "resend",
+  preferred_email_provider: "other" as PreferredEmailProvider,
   sending_domain: "listingmediact.com",
   from_name: "TJ Muldoon",
   from_email: "tj@listingmediact.com",
@@ -42,6 +47,7 @@ const defaultSendingSettings = {
 const sendingSettingsColumns = [
   "id",
   "provider",
+  "preferred_email_provider",
   "sending_domain",
   "from_name",
   "from_email",
@@ -114,6 +120,9 @@ export async function upsertSendingSettings(input: SendingSettingsInput) {
 function normalizeSendingSettingsInput(input: SendingSettingsInput) {
   return {
     provider: normalizeText(input.provider, defaultSendingSettings.provider),
+    preferred_email_provider: normalizePreferredEmailProvider(
+      input.preferred_email_provider,
+    ),
     sending_domain: normalizeText(
       input.sending_domain,
       defaultSendingSettings.sending_domain,
@@ -135,6 +144,16 @@ function normalizeSendingSettingsInput(input: SendingSettingsInput) {
         : defaultSendingSettings.test_mode_only,
     domain_verified: Boolean(input.domain_verified),
   };
+}
+
+function normalizePreferredEmailProvider(
+  value: unknown,
+): PreferredEmailProvider {
+  if (value === "gmail" || value === "outlook" || value === "other") {
+    return value;
+  }
+
+  return defaultSendingSettings.preferred_email_provider;
 }
 
 function normalizeText(value: unknown, fallback: string) {
