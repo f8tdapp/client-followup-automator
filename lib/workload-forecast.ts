@@ -519,7 +519,6 @@ export function buildWorkloadForecast(
     (item) => item.dueDate <= addDays(endDate, 1) && item.rollCount > 0,
   ).length;
   const backlogByCampaign = new Map<string, number>();
-  const newContactBacklogByCampaign = new Map<string, number>();
   for (const item of pending.filter(
     (row) => row.dueDate <= addDays(endDate, 1) && row.rollCount > 0,
   )) {
@@ -527,12 +526,6 @@ export function buildWorkloadForecast(
       item.campaignId,
       (backlogByCampaign.get(item.campaignId) ?? 0) + 1,
     );
-    if (item.stepNumber === 1) {
-      newContactBacklogByCampaign.set(
-        item.campaignId,
-        (newContactBacklogByCampaign.get(item.campaignId) ?? 0) + 1,
-      );
-    }
   }
   const busiestBacklogCampaign = [...input.campaigns].sort((left, right) => {
     const countDifference =
@@ -541,40 +534,13 @@ export function buildWorkloadForecast(
     return countDifference || left.id.localeCompare(right.id);
   })[0];
   const busiestCount = busiest?.totalProjected ?? 0;
-  const currentNewContactLimit = busiestBacklogCampaign
-    ? normalizeDailyLimit(
-        busiestBacklogCampaign.new_contacts_per_day,
-        DEFAULT_NEW_CONTACTS_PER_DAY,
-      )
-    : 0;
-  const recommendedNewContactLimit = busiestBacklogCampaign
-    ? Math.max(
-        1,
-        currentNewContactLimit -
-          Math.ceil(
-            (newContactBacklogByCampaign.get(busiestBacklogCampaign.id) ?? 0) /
-              context.dayCount,
-          ),
-      )
-    : 0;
-  const hasCapacityConstraint = days.some(
-    (day) =>
-      day.constraints.accountCapacityOverflow > 0 ||
-      day.constraints.campaignCapacityOverflow > 0 ||
-      day.constraints.newContactIntake > 0,
-  );
   const recommendation =
     totalForecastWorkload === 0 && backlog === 0
       ? "No projected workload."
-      : backlog > 0 &&
-          busiestBacklogCampaign &&
-          hasCapacityConstraint &&
-          recommendedNewContactLimit < currentNewContactLimit
-        ? `Reduce ${busiestBacklogCampaign.name} from ${currentNewContactLimit} to ${recommendedNewContactLimit} new contacts per day to reduce projected backlog.`
-        : backlog > 0 && busiestBacklogCampaign
-          ? `${busiestBacklogCampaign.name} has ${
+      : backlog > 0 && busiestBacklogCampaign
+        ? `Pause new enrolments for ${busiestBacklogCampaign.name}. Its active queue has ${
               backlogByCampaign.get(busiestBacklogCampaign.id) ?? 0
-            } projected backlog items; review its capacity and eligibility constraints.`
+            } projected backlog items after 30 days.`
         : "Current campaign intake limits fit the projected account capacity.";
 
   return {

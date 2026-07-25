@@ -1029,6 +1029,7 @@ export default function Dashboard() {
   >([]);
   const [dailySendPlan, setDailySendPlan] =
     useState<DailySendPlan>(emptyDailySendPlan);
+  const [showFullForecast, setShowFullForecast] = useState(false);
   const [forecastUiState, setForecastUiState] = useState(() =>
     createForecastUiState<WorkloadForecast>(),
   );
@@ -1036,6 +1037,9 @@ export default function Dashboard() {
     createLatestRequestGuard(),
   );
   const workloadForecast = forecastUiState.data ?? emptyWorkloadForecast;
+  const visibleWorkloadForecastDays = showFullForecast
+    ? workloadForecast.days
+    : workloadForecast.days.slice(0, 7);
   const [dailyDrafts, setDailyDrafts] = useState<EmailDraft[]>([]);
   const [emailDraftSummary, setEmailDraftSummary] =
     useState<EmailDraftSummary>(emptyEmailDraftSummary);
@@ -2758,6 +2762,8 @@ export default function Dashboard() {
   }
 
   function handleSidebarNav(item: string) {
+    setShowMoreActions(false);
+
     if (item === "Home") {
       setActiveView("home");
       scrollToElement(heroRef);
@@ -2843,6 +2849,11 @@ export default function Dashboard() {
   }
 
   function openAdvancedTools() {
+    if (activeView === "advanced") {
+      setShowMoreActions((current) => !current);
+      return;
+    }
+
     setActiveView("advanced");
     setShowMoreActions(true);
     setShowAdminTools(true);
@@ -2903,7 +2914,9 @@ export default function Dashboard() {
                 );
               })}
               <button
-                className={`rounded-xl px-3 py-2 text-left transition ${
+                aria-controls="advanced-navigation"
+                aria-expanded={showMoreActions}
+                className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
                   activeView === "advanced"
                     ? "bg-white/15 text-white"
                     : "text-cyan-50/80 hover:bg-white/10 hover:text-white"
@@ -2911,10 +2924,21 @@ export default function Dashboard() {
                 onClick={openAdvancedTools}
                 type="button"
               >
-                Advanced
+                <span>Advanced</span>
+                <span
+                  aria-hidden="true"
+                  className={`text-xs transition-transform ${
+                    showMoreActions ? "rotate-180" : ""
+                  }`}
+                >
+                  v
+                </span>
               </button>
               {showMoreActions && (
-                <div className="ml-2 grid gap-1 border-l border-white/10 pl-3">
+                <div
+                  className="ml-2 grid gap-1 border-l border-white/10 pl-3"
+                  id="advanced-navigation"
+                >
                   <button
                     className="rounded-lg px-3 py-2 text-left text-cyan-50/80 transition hover:bg-white/10 hover:text-white"
                     onClick={() => openActionPanel("client")}
@@ -3331,7 +3355,13 @@ export default function Dashboard() {
                   </p>
                 </div>
                 {forecastUiState.data && (
-                  <div className="max-w-xl rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm font-medium text-cyan-950">
+                  <div
+                    className={`max-w-xl rounded-xl border px-4 py-3 text-sm font-medium ${
+                      workloadForecast.summary.projectedBacklogAfter30Days > 0
+                        ? "border-amber-300 bg-amber-50 text-amber-950"
+                        : "border-cyan-200 bg-cyan-50 text-cyan-950"
+                    }`}
+                  >
                     {workloadForecast.recommendation}
                   </div>
                 )}
@@ -3414,6 +3444,24 @@ export default function Dashboard() {
             </div>
 
             {forecastUiState.data && (
+            <>
+            <div className="flex flex-col gap-3 border-b border-cyan-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <p className="text-sm text-slate-600">
+                {showFullForecast
+                  ? "Showing the full 30-day forecast and constraint detail."
+                  : "Showing the next 7 days."}
+              </p>
+              <button
+                aria-expanded={showFullForecast}
+                className="inline-flex w-fit items-center gap-2 rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-semibold text-cyan-900 transition hover:bg-cyan-50"
+                onClick={() => setShowFullForecast((current) => !current)}
+                type="button"
+              >
+                {showFullForecast
+                  ? "Show next 7 days"
+                  : "View full 30-day forecast"}
+              </button>
+            </div>
             <div className="overflow-x-auto">
               <table className="min-w-full text-left text-xs">
                 <thead className="bg-slate-100 text-slate-600">
@@ -3429,18 +3477,24 @@ export default function Dashboard() {
                         Email {stepNumber}
                       </th>
                     ))}
+                    {showFullForecast && (
+                    <>
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Due
                     </th>
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Backlog
                     </th>
+                    </>
+                    )}
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Total
                     </th>
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Remaining
                     </th>
+                    {showFullForecast && (
+                    <>
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Account overflow
                     </th>
@@ -3459,13 +3513,15 @@ export default function Dashboard() {
                     <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
                       Suppressed
                     </th>
+                    </>
+                    )}
                     <th className="whitespace-nowrap px-3 py-2.5 font-semibold">
                       Status
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
-                  {workloadForecast.days.map((day) => (
+                  {visibleWorkloadForecastDays.map((day) => (
                     <tr key={day.date}>
                       <td className="whitespace-nowrap px-3 py-2.5 font-medium text-slate-900">
                         {formatDate(day.date)}
@@ -3478,18 +3534,24 @@ export default function Dashboard() {
                           {day.stepCounts[String(stepNumber)] ?? 0}
                         </td>
                       ))}
+                      {showFullForecast && (
+                      <>
                       <td className="px-3 py-2.5 text-center text-slate-700">
                         {day.originallyDue}
                       </td>
                       <td className="px-3 py-2.5 text-center text-slate-700">
                         {day.rolledForwardBacklog}
                       </td>
+                      </>
+                      )}
                       <td className="whitespace-nowrap px-3 py-2.5 text-center font-semibold text-slate-950">
                         {day.totalProjected} of {day.dailyCapacity}
                       </td>
                       <td className="px-3 py-2.5 text-center text-slate-700">
                         {day.remainingCapacity}
                       </td>
+                      {showFullForecast && (
+                      <>
                       <td className="px-3 py-2.5 text-center font-semibold text-amber-700">
                         {day.projectedOverflow}
                       </td>
@@ -3508,6 +3570,8 @@ export default function Dashboard() {
                       <td className="px-3 py-2.5 text-center text-slate-700">
                         {day.constraints.terminalSuppression}
                       </td>
+                      </>
+                      )}
                       <td className="whitespace-nowrap px-3 py-2.5">
                         <span
                           className={`inline-flex rounded-full px-2.5 py-1 font-semibold ${
@@ -3526,6 +3590,7 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
+            </>
             )}
           </section>
 
