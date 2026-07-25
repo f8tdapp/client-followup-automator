@@ -1034,6 +1034,7 @@ export default function Dashboard() {
     "client" | "csv" | "campaign" | "template" | null
   >(null);
   const [showMoreActions, setShowMoreActions] = useState(false);
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const [activeView, setActiveView] = useState<
     "home" | "send-plan" | "campaigns" | "contacts" | "settings" | "advanced"
   >("home");
@@ -1990,6 +1991,17 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    function handleScroll() {
+      setShowBackToTop(window.scrollY > 600);
+    }
+
+    handleScroll();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
     let isActive = true;
 
     if (!timelineClient?.id) {
@@ -2652,7 +2664,7 @@ export default function Dashboard() {
       return;
     }
 
-    if (item === "Contacts") {
+    if (item === "HubSpot Contacts") {
       openContactsPreview();
       return;
     }
@@ -2730,7 +2742,7 @@ export default function Dashboard() {
   return (
     <main className="min-h-screen bg-[#dfe8f3] text-slate-950">
       <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
-        <aside className="flex shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:min-h-[calc(100vh-2.5rem)] lg:w-60">
+        <aside className="flex shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-xl bg-emerald-400 text-base font-bold text-[#071b33]">
@@ -2751,7 +2763,7 @@ export default function Dashboard() {
                 "Home",
                 "Today's Send Plan",
                 "Campaigns",
-                "Contacts",
+                "HubSpot Contacts",
                 "Settings",
               ].map((item) => {
                 const itemView =
@@ -2759,6 +2771,8 @@ export default function Dashboard() {
                     ? "home"
                     : item === "Today's Send Plan"
                       ? "send-plan"
+                      : item === "HubSpot Contacts"
+                        ? "contacts"
                       : item.toLowerCase();
 
                 return (
@@ -2836,11 +2850,26 @@ export default function Dashboard() {
             </nav>
           </div>
 
-          <div className="mt-5 rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
-            <p className="font-semibold text-white">Tip</p>
-            <p className="mt-1 text-cyan-50/80">
-              Check Next Action when you want the next useful step.
-            </p>
+          <div className="mt-5 grid gap-3">
+            {showBackToTop && (
+              <button
+                aria-label="Back to top"
+                className="fixed bottom-4 right-4 z-40 inline-flex items-center justify-center gap-2 rounded-xl bg-[#071b33] px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-offset-2 lg:static lg:w-full lg:border lg:border-white/15 lg:bg-white/10 lg:shadow-none lg:hover:bg-white/15"
+                onClick={() =>
+                  window.scrollTo({ top: 0, behavior: "smooth" })
+                }
+                type="button"
+              >
+                <span aria-hidden="true">↑</span>
+                Back to top
+              </button>
+            )}
+            <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
+              <p className="font-semibold text-white">Tip</p>
+              <p className="mt-1 text-cyan-50/80">
+                Check Next Action when you want the next useful step.
+              </p>
+            </div>
           </div>
         </aside>
 
@@ -4486,16 +4515,67 @@ export default function Dashboard() {
           )}
 
           {activeView === "contacts" && (
-            <div className="scroll-mt-6" ref={advancedToolsRef}>
-              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                Contact data
-              </p>
-              <h2 className="mt-1 text-xl font-semibold text-slate-950">
-                Contacts
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                Search the synced contact preview and review contact timelines.
-              </p>
+            <div
+              className="scroll-mt-6 overflow-hidden rounded-2xl border border-cyan-100 bg-gradient-to-br from-white via-white to-cyan-50 p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)] sm:p-6"
+              ref={advancedToolsRef}
+            >
+              <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                    HubSpot workspace
+                  </p>
+                  <h2 className="mt-1 text-2xl font-semibold text-slate-950">
+                    HubSpot Contacts
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                    Search synced contacts, review engagement signals, and open
+                    individual activity timelines.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs font-semibold">
+                  <span
+                    className={`inline-flex items-center rounded-full border px-3 py-1.5 ${
+                      hubSpotIsConnected
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-amber-200 bg-amber-50 text-amber-800"
+                    }`}
+                  >
+                    {hubSpotIsConnected ? "HubSpot connected" : "HubSpot not connected"}
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1.5 text-slate-600">
+                    {hubSpotStatus.lastSyncAt
+                      ? `Last sync ${formatDateTime(hubSpotStatus.lastSyncAt)}`
+                      : "No sync recorded"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-white bg-white/90 p-4 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Synced contacts
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-950">
+                    {healthMetrics.totalContacts}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-white bg-white/90 p-4 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Eligible today
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-950">
+                    {healthMetrics.eligibleContacts}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-white bg-white/90 p-4 shadow-sm">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Enrolled
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-950">
+                    {healthMetrics.enrolledContacts}
+                  </p>
+                </div>
+              </div>
             </div>
           )}
 
@@ -4539,27 +4619,33 @@ export default function Dashboard() {
               (showCampaigns ||
                 openPanel === "client" ||
                 openPanel === "csv"))) && (
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+            <div
+              className={`grid gap-6 ${
+                timelineClient
+                  ? "xl:grid-cols-[minmax(0,1fr)_420px]"
+                  : "grid-cols-1"
+              }`}
+            >
               <div className="flex min-w-0 flex-col gap-6">
                 {activeView === "contacts" && showContacts && (
             <div
-              className="scroll-mt-6 rounded-lg border border-white bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
+              className="scroll-mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]"
               ref={contactsPreviewRef}
             >
-              <div className="flex flex-col gap-4 border-b border-slate-200 bg-slate-50 p-5 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-col gap-4 border-b border-slate-200 bg-white p-5 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-950">
-                    HubSpot Contact Preview
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Contacts come from HubSpot. Search the local preview and
-                    open a timeline when needed.
+                  <h3 className="text-lg font-semibold text-slate-950">
+                    Synced contact directory
+                  </h3>
+                  <p className="mt-1 text-sm leading-5 text-slate-500">
+                    Read-only HubSpot data. Search the local sync and open a
+                    timeline for more context.
                   </p>
                 </div>
                 <label className="w-full lg:max-w-md">
                   <span className="sr-only">Search contacts</span>
                   <input
-                    className="h-11 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                    className="h-11 w-full rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-cyan-600 focus:bg-white focus:ring-2 focus:ring-cyan-100"
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     placeholder="Search name, company, or email"
