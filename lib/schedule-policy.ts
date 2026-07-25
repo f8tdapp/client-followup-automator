@@ -41,6 +41,20 @@ export type SchedulePolicyOptions = {
   brokerDomainCounts?: ReadonlyMap<string, number>;
 };
 
+export type CampaignScheduleLimits = {
+  totalDailyLimit: number;
+  newContactsPerDay: number;
+};
+
+export type GlobalSchedulePolicyOptions = {
+  accountDailyLimit: number;
+  campaignLimits: ReadonlyMap<string, CampaignScheduleLimits>;
+  existingAccountScheduled?: number;
+  existingCampaignScheduled?: ReadonlyMap<string, number>;
+  existingCampaignNewContacts?: ReadonlyMap<string, number>;
+  brokerDomainCounts?: ReadonlyMap<string, number>;
+};
+
 export type ExistingPlanBoundary<T> = {
   hasExistingPlan: () => Promise<boolean>;
   loadExistingPlan: () => Promise<T>;
@@ -94,12 +108,54 @@ export function applySchedulingPolicy(
   candidates: ScheduleCandidate[],
   options: SchedulePolicyOptions,
 ) {
-  let scheduledCount = options.existingScheduled ?? 0;
-  let newContactCount = options.existingNewContacts ?? 0;
+  const campaignId = candidates[0]?.campaignId ?? "__single_campaign__";
+  const result = applyGlobalSchedulingPolicy(
+    candidates.map((candidate) => ({ ...candidate, campaignId })),
+    {
+      accountDailyLimit: MAX_DAILY_LIMIT,
+      campaignLimits: new Map([
+        [
+          campaignId,
+          {
+            totalDailyLimit: options.totalDailyLimit,
+            newContactsPerDay: options.newContactsPerDay,
+          },
+        ],
+      ]),
+      existingAccountScheduled: options.existingScheduled,
+      existingCampaignScheduled: new Map([
+        [campaignId, options.existingScheduled ?? 0],
+      ]),
+      existingCampaignNewContacts: new Map([
+        [campaignId, options.existingNewContacts ?? 0],
+      ]),
+      brokerDomainCounts: options.brokerDomainCounts,
+    },
+  );
+
+  return {
+    outcomes: result.outcomes,
+    scheduledCount: result.accountScheduledCount,
+    newContactCount: result.campaignNewContactCounts.get(campaignId) ?? 0,
+    brokerDomainCounts: result.brokerDomainCounts,
+  };
+}
+
+export function applyGlobalSchedulingPolicy(
+  candidates: ScheduleCandidate[],
+  options: GlobalSchedulePolicyOptions,
+) {
+  let accountScheduledCount = options.existingAccountScheduled ?? 0;
+  const campaignScheduledCounts = new Map(
+    options.existingCampaignScheduled ?? [],
+  );
+  const campaignNewContactCounts = new Map(
+    options.existingCampaignNewContacts ?? [],
+  );
   const brokerDomainCounts = new Map(options.brokerDomainCounts ?? []);
   const outcomes: ScheduleOutcome[] = [];
 
-  for (const candidate of sortDueEnrollments(candidates)) {
+  for (const candidate of sortGlobalScheduleCandidates(candidates)) {
     if (candidate.restriction.kind !== "safe") {
       outcomes.push({
         ...candidate,
@@ -111,7 +167,24 @@ export function applySchedulingPolicy(
       continue;
     }
 
-    if (scheduledCount >= options.totalDailyLimit) {
+    if (accountScheduledCount >= options.accountDailyLimit) {
+      outcomes.push({
+        ...candidate,
+        action: "roll_forward",
+        status: "skipped",
+        reason: "Account daily send limit reached.",
+        safetyStatus: "account_limit_reached",
+      });
+      continue;
+    }
+
+    const limits = options.campaignLimits.get(candidate.campaignId);
+    const campaignScheduledCount =
+      campaignScheduledCounts.get(candidate.campaignId) ?? 0;
+    const campaignNewContactCount =
+      campaignNewContactCounts.get(candidate.campaignId) ?? 0;
+
+    if (!limits || campaignScheduledCount >= limits.totalDailyLimit) {
       outcomes.push({
         ...candidate,
         action: "roll_forward",
@@ -124,7 +197,7 @@ export function applySchedulingPolicy(
 
     if (
       candidate.current_step === 1 &&
-      newContactCount >= options.newContactsPerDay
+      campaignNewContactCount >= limits.newContactsPerDay
     ) {
       outcomes.push({
         ...candidate,
@@ -156,17 +229,41 @@ export function applySchedulingPolicy(
       reason: `Ready for Email ${candidate.current_step}.`,
       safetyStatus: "safe",
     });
-    scheduledCount += 1;
-    newContactCount += candidate.current_step === 1 ? 1 : 0;
+    accountScheduledCount += 1;
+    campaignScheduledCounts.set(
+      candidate.campaignId,
+      campaignScheduledCount + 1,
+    );
+    campaignNewContactCounts.set(
+      candidate.campaignId,
+      campaignNewContactCount + (candidate.current_step === 1 ? 1 : 0),
+    );
     brokerDomainCounts.set(candidate.brokerDomain, brokerCount + 1);
   }
 
   return {
     outcomes,
-    scheduledCount,
-    newContactCount,
+    accountScheduledCount,
+    campaignScheduledCounts,
+    campaignNewContactCounts,
     brokerDomainCounts,
   };
+}
+
+function sortGlobalScheduleCandidates(candidates: ScheduleCandidate[]) {
+  return [...candidates].sort((left, right) => {
+    if (left.current_step !== right.current_step) {
+      return right.current_step - left.current_step;
+    }
+    const dueComparison = left.next_send_date.localeCompare(right.next_send_date);
+    if (dueComparison) return dueComparison;
+    return (
+      left.campaignId.localeCompare(right.campaignId) ||
+      left.enrollmentId.localeCompare(right.enrollmentId) ||
+      left.contactId.localeCompare(right.contactId) ||
+      left.id.localeCompare(right.id)
+    );
+  });
 }
 
 export async function loadAllDeterministicPages<T>(

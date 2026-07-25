@@ -1,6 +1,11 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { allocatePreparedDailyGeneration } from "@/lib/schedule-preparation";
 import {
-  applySchedulingPolicy,
+  getDefaultCampaignStep,
+  mergeCampaignSteps,
+  planCampaignStepRepairs,
+} from "@/lib/campaign-step-repairs";
+import {
   DEFAULT_NEW_CONTACTS_PER_DAY,
   DEFAULT_TOTAL_DAILY_LIMIT,
   generateUnlessPlanExists,
@@ -8,7 +13,6 @@ import {
   normalizeDailyLimit,
   persistScheduleOutcomes,
   runTwoPhaseGeneration,
-  ScheduleCandidate,
 } from "@/lib/schedule-policy";
 
 type CampaignRow = {
@@ -36,16 +40,13 @@ type CampaignStepRow = {
   status: string;
 };
 
-type DefaultCampaignStep = {
+type CampaignStepRepairRow = {
+  campaign_id: string;
   step_number: number;
   delay_days: number;
   subject_template: string;
   body_template: string;
   status: string;
-};
-
-type CampaignStepRepairRow = DefaultCampaignStep & {
-  campaign_id: string;
   updated_at: string;
 };
 
@@ -63,6 +64,7 @@ type PreparedDailyGeneration = {
   campaignInputs: PreparedCampaignInput[];
   existingScheduled: Awaited<ReturnType<typeof getExistingScheduledCounts>>;
   domainLimits: Map<string, number>;
+  accountDailyLimit: number;
 };
 
 type HubSpotContactScheduleRow = {
@@ -200,16 +202,6 @@ export type DailySendPlan = {
 } & DailySendPlanDiagnostics;
 
 const scheduleStatuses = ["scheduled", "skipped"];
-const suppressionTypes = new Set([
-  "replied",
-  "reply",
-  "bounced",
-  "bounce",
-  "unsubscribed",
-  "unsubscribe",
-  "do_not_contact",
-  "snoozed",
-]);
 const terminalSuppressionStatuses = new Set([
   "replied",
   "reply",
@@ -264,15 +256,20 @@ export function createEmptyDailySendPlan(
   };
 }
 
-export async function generateDailySendSchedule(date = getTodayDate()) {
+export async function generateDailySendSchedule(
+  date?: string,
+  requestedAt = new Date().toISOString(),
+) {
+  const scheduledDate = date ?? requestedAt.slice(0, 10);
   return generateUnlessPlanExists({
-    hasExistingPlan: () => hasExistingScheduleRows(date),
-    loadExistingPlan: () => getDailySendPlan(date),
-    generateNewPlan: () => generateNewDailySendSchedule(date),
+    hasExistingPlan: () => hasExistingScheduleRows(scheduledDate),
+    loadExistingPlan: () => getDailySendPlan(scheduledDate),
+    generateNewPlan: () =>
+      generateNewDailySendSchedule(scheduledDate, requestedAt),
   });
 }
 
-async function generateNewDailySendSchedule(date: string) {
+async function generateNewDailySendSchedule(date: string, requestedAt: string) {
   let currentOperation = "generate_today.start";
 
   logScheduleOperationStart("generate_today.start", {
@@ -297,7 +294,8 @@ async function generateNewDailySendSchedule(date: string) {
     currentOperation = "generate_today.prepare";
     const brokerDomainCounts = await runTwoPhaseGeneration({
       prepare: () => prepareDailyGeneration(campaigns, date),
-      persist: (prepared) => persistPreparedDailyGeneration(prepared, date),
+      persist: (prepared) =>
+        persistPreparedDailyGeneration(prepared, date, requestedAt),
     });
 
     currentOperation = "generate_today.compute_domain_limits";
@@ -355,9 +353,10 @@ async function prepareDailyGeneration(
   date: string,
 ): Promise<PreparedDailyGeneration> {
   const preparedSteps = await prepareCampaignSteps(campaigns);
-  const [existingScheduled, domainLimits] = await Promise.all([
+  const [existingScheduled, domainLimits, accountDailyLimit] = await Promise.all([
     getExistingScheduledCounts(date),
     getBrokerDomainLimits(),
+    getAccountDailyLimit(),
   ]);
   const campaignInputs: PreparedCampaignInput[] = [];
 
@@ -404,15 +403,16 @@ async function prepareDailyGeneration(
     ]) as unknown as PreparedCampaignInput[],
     existingScheduled,
     domainLimits,
+    accountDailyLimit,
   });
 }
 
 async function persistPreparedDailyGeneration(
   prepared: PreparedDailyGeneration,
   date: string,
+  requestedAt: string,
 ) {
   const repairedSteps = await persistCampaignStepRepairs(prepared.stepRepairs);
-  const steps = mergeCampaignSteps(prepared.existingSteps, repairedSteps);
   const brokerDomainCounts = new Map(
     prepared.existingScheduled.brokerDomainCounts,
   );
@@ -420,91 +420,52 @@ async function persistPreparedDailyGeneration(
   const campaignNewContactCounts = new Map(
     prepared.existingScheduled.campaignNewContactCounts,
   );
+  const preparedAllocation = allocatePreparedDailyGeneration({
+    campaigns: prepared.campaigns,
+    existingSteps: prepared.existingSteps,
+    persistedRepairedSteps: repairedSteps,
+    campaignInputs: prepared.campaignInputs,
+    date,
+    evaluatedAt: requestedAt,
+    domainLimits: prepared.domainLimits,
+    accountDailyLimit: prepared.accountDailyLimit,
+    existingAccountScheduled: Array.from(campaignCounts.values()).reduce(
+      (total, count) => total + count,
+      0,
+    ),
+    existingCampaignScheduled: campaignCounts,
+    existingCampaignNewContacts: campaignNewContactCounts,
+    brokerDomainCounts,
+    defaultTotalLimit: DEFAULT_TOTAL_DAILY_LIMIT,
+    defaultNewContactLimit: DEFAULT_NEW_CONTACTS_PER_DAY,
+  });
+  for (const stopped of preparedAllocation.stops) {
+    await stopEnrollment(stopped.enrollmentId, stopped.safetyStatus);
+  }
 
-  for (const input of prepared.campaignInputs) {
-    const campaignSteps = steps
-      .filter((step) => step.campaign_id === input.campaign.id)
-      .sort((left, right) => left.step_number - right.step_number);
-    const candidates: ScheduleCandidate[] = [];
+  const policyResult = preparedAllocation.allocation;
 
-    for (const enrollment of input.enrollments) {
-      const contact = input.contacts.get(enrollment.contact_id);
-      const step = campaignSteps.find(
-        (campaignStep) => campaignStep.step_number === enrollment.current_step,
-      );
+  await persistScheduleOutcomes(policyResult.outcomes, {
+    writeSchedule: (outcome) =>
+      upsertScheduleRow({
+        contactId: outcome.contactId,
+        campaignId: outcome.campaignId,
+        campaignStepId: outcome.campaignStepId,
+        scheduledDate: date,
+        brokerDomain: outcome.brokerDomain,
+        status: outcome.status,
+        reason: outcome.reason,
+        safetyStatus: outcome.safetyStatus,
+      }),
+    rollForwardEnrollment: (outcome) =>
+      rollEnrollmentForward(outcome.enrollmentId, date, 1),
+    stopEnrollment: (outcome) =>
+      stopEnrollment(outcome.enrollmentId, outcome.safetyStatus),
+  });
 
-      if (!contact || !step) {
-        await stopEnrollment(enrollment.id, "missing_campaign_step");
-        continue;
-      }
-
-      const brokerDomain = getBrokerDomain(contact);
-      const safety = getSafetyStatus(
-        contact,
-        input.suppressionRules.get(contact.id) ?? [],
-        input.campaign,
-        date,
-      );
-
-      candidates.push({
-        id: enrollment.id,
-        enrollmentId: enrollment.id,
-        contactId: contact.id,
-        campaignId: input.campaign.id,
-        campaignStepId: step.id,
-        current_step: step.step_number,
-        next_send_date: enrollment.next_send_date,
-        brokerDomain,
-        brokerDomainLimit:
-          prepared.domainLimits.get(brokerDomain) ??
-          input.campaign.broker_domain_daily_limit ??
-          3,
-        restriction: safety.safe
-          ? { kind: "safe" }
-          : {
-              kind: safety.terminal ? "stop" : "roll_forward",
-              reason: safety.reason,
-              safetyStatus: safety.safetyStatus,
-            },
-      });
-    }
-
-    const policyResult = applySchedulingPolicy(candidates, {
-      totalDailyLimit: getCampaignTotalDailyLimit(input.campaign),
-      newContactsPerDay: getCampaignNewContactLimit(input.campaign),
-      existingScheduled: campaignCounts.get(input.campaign.id) ?? 0,
-      existingNewContacts:
-        campaignNewContactCounts.get(input.campaign.id) ?? 0,
-      brokerDomainCounts,
-    });
-
-    await persistScheduleOutcomes(policyResult.outcomes, {
-      writeSchedule: (outcome) =>
-        upsertScheduleRow({
-          contactId: outcome.contactId,
-          campaignId: outcome.campaignId,
-          campaignStepId: outcome.campaignStepId,
-          scheduledDate: date,
-          brokerDomain: outcome.brokerDomain,
-          status: outcome.status,
-          reason: outcome.reason,
-          safetyStatus: outcome.safetyStatus,
-        }),
-      rollForwardEnrollment: (outcome) =>
-        rollEnrollmentForward(outcome.enrollmentId, date, 1),
-      stopEnrollment: (outcome) =>
-        stopEnrollment(outcome.enrollmentId, outcome.safetyStatus),
-    });
-
-    campaignCounts.set(input.campaign.id, policyResult.scheduledCount);
-    campaignNewContactCounts.set(
-      input.campaign.id,
-      policyResult.newContactCount,
-    );
-    brokerDomainCounts.clear();
-    for (const [domain, count] of policyResult.brokerDomainCounts) {
-      brokerDomainCounts.set(domain, count);
-    }
+  brokerDomainCounts.clear();
+  for (const [domain, count] of policyResult.brokerDomainCounts) {
+    brokerDomainCounts.set(domain, count);
   }
 
   return brokerDomainCounts;
@@ -543,7 +504,7 @@ export async function getDailySendPlan(date = getTodayDate()) {
 
   const rows = await enrichDailySendScheduleRows(data ?? []);
   const scheduledRows = rows.filter((row) => row.status === "scheduled");
-  const activeCampaigns = await getActiveCampaigns();
+  const accountDailyLimit = await getAccountDailyLimit();
   const summary = {
     scheduledDate: date,
     totalScheduled: scheduledRows.length,
@@ -556,12 +517,11 @@ export async function getDailySendPlan(date = getTodayDate()) {
     dueEmail1: countStep(scheduledRows, 1),
     dueEmail2: countStep(scheduledRows, 2),
     dueEmail3: countStep(scheduledRows, 3),
-    totalDailyLimit: activeCampaigns.reduce(
-      (total, campaign) => total + getCampaignTotalDailyLimit(campaign),
-      0,
-    ) || DEFAULT_TOTAL_DAILY_LIMIT,
+    totalDailyLimit: accountDailyLimit,
     rolledForwardTotalLimit: rows.filter(
-      (row) => row.safety_status === "campaign_limit_reached",
+      (row) =>
+        row.safety_status === "account_limit_reached" ||
+        row.safety_status === "campaign_limit_reached",
     ).length,
     rolledForwardNewContactLimit: rows.filter(
       (row) => row.safety_status === "new_contact_limit_reached",
@@ -569,6 +529,7 @@ export async function getDailySendPlan(date = getTodayDate()) {
     rolledForwardSafetyLimit: rows.filter(
       (row) =>
         row.status !== "scheduled" &&
+        row.safety_status !== "account_limit_reached" &&
         row.safety_status !== "campaign_limit_reached" &&
         row.safety_status !== "new_contact_limit_reached" &&
         !terminalSuppressionStatuses.has(row.safety_status),
@@ -1123,30 +1084,11 @@ async function prepareCampaignSteps(campaigns: CampaignRow[]) {
   });
 
   const existingSteps = data ?? [];
-  const stepRepairs: CampaignStepRepairRow[] = campaigns.flatMap((campaign) => {
-    const existingStepNumbers = new Set(
-      existingSteps
-        .filter((step) => step.campaign_id === campaign.id)
-        .map((step) => step.step_number),
-    );
-    const repairableSteps = existingSteps
-      .filter((step) => step.campaign_id === campaign.id)
-      .filter(shouldRepairDefaultCampaignStep)
-      .map((step) => ({
-        campaign_id: campaign.id,
-        ...getDefaultCampaignStep(step.step_number),
-        updated_at: new Date().toISOString(),
-      }));
-    const missingSteps = [1, 2, 3]
-      .filter((stepNumber) => !existingStepNumbers.has(stepNumber))
-      .map((stepNumber) => ({
-        campaign_id: campaign.id,
-        ...getDefaultCampaignStep(stepNumber),
-        updated_at: new Date().toISOString(),
-      }));
-
-    return [...repairableSteps, ...missingSteps];
-  });
+  const stepRepairs = planCampaignStepRepairs(
+    campaigns,
+    existingSteps,
+    new Date().toISOString(),
+  );
 
   return { existingSteps, stepRepairs };
 }
@@ -1182,77 +1124,6 @@ async function persistCampaignStepRepairs(stepRepairs: CampaignStepRepairRow[]) 
   });
 
   return upsertedSteps ?? [];
-}
-
-function mergeCampaignSteps(
-  existingSteps: CampaignStepRow[],
-  repairedSteps: CampaignStepRow[],
-) {
-  const repairedKeys = new Set(
-    repairedSteps.map((step) => `${step.campaign_id}:${step.step_number}`),
-  );
-
-  return [
-    ...existingSteps.filter(
-      (step) => !repairedKeys.has(`${step.campaign_id}:${step.step_number}`),
-    ),
-    ...repairedSteps,
-  ];
-}
-
-function getDefaultCampaignStep(stepNumber: number): DefaultCampaignStep {
-  if (stepNumber === 1) {
-    return {
-      step_number: 1,
-      delay_days: 0,
-      subject_template: "Quick introduction",
-      body_template:
-        "Hi {first_name},\n\nI just wanted to introduce myself. We help real estate agents with listing photography, video, drone, and marketing content.\n\nIf you ever need help with an upcoming listing, I'd be happy to help.\n\nBest,\nTJ Muldoon",
-      status: "active",
-    };
-  }
-
-  if (stepNumber === 2) {
-    return {
-      step_number: 2,
-      delay_days: 14,
-      subject_template: "Just checking in",
-      body_template:
-        "Hi {first_name},\n\nJust checking back in to see if you have any upcoming listings or marketing needs.\n\nWe can help with photography, video, drone, and listing media when something comes up.\n\nBest,\nTJ Muldoon",
-      status: "active",
-    };
-  }
-
-  return {
-    step_number: 3,
-    delay_days: 30,
-    subject_template: "Should I close the loop?",
-    body_template:
-      "Hi {first_name},\n\nI didn't want to keep bothering you, so I'll make this my last quick follow-up.\n\nIf you ever need listing photography, video, drone, or marketing support, I'd be happy to help.\n\nBest,\nTJ Muldoon",
-    status: "active",
-  };
-}
-
-function shouldRepairDefaultCampaignStep(step: CampaignStepRow) {
-  return (
-    !step.body_template.trim() ||
-    !step.subject_template.trim() ||
-    step.subject_template.startsWith(`Email ${step.step_number}:`) ||
-    isObviousStarterCopyPlaceholder(step.subject_template) ||
-    isObviousStarterCopyPlaceholder(step.body_template)
-  );
-}
-
-function isObviousStarterCopyPlaceholder(value: string) {
-  const normalizedValue = value.trim().toLowerCase();
-
-  return (
-    normalizedValue === "no body copy yet" ||
-    normalizedValue.includes("tj did you get this") ||
-    normalizedValue.includes("lorem ipsum") ||
-    normalizedValue === "test" ||
-    normalizedValue === "asdf"
-  );
 }
 
 async function enrollQualifiedContacts(campaign: CampaignRow, date: string) {
@@ -2148,6 +2019,33 @@ async function getBrokerDomainLimits() {
   return new Map((data ?? []).map((limit) => [limit.broker_domain, limit.daily_limit]));
 }
 
+async function getAccountDailyLimit() {
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data, error } = await runScheduleQuery(
+    "generate_today.load_account_daily_limit",
+    () =>
+      supabaseAdmin
+        .from("sending_settings")
+        .select("daily_send_limit")
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .returns<Array<{ daily_send_limit: number }>>(),
+  );
+
+  if (error) {
+    throw createCampaignScheduleOperationError(
+      "Account daily limit load failed",
+      "generate_today.load_account_daily_limit",
+      error,
+    );
+  }
+
+  return normalizeDailyLimit(
+    data?.[0]?.daily_send_limit,
+    DEFAULT_TOTAL_DAILY_LIMIT,
+  );
+}
+
 async function getExistingScheduledCounts(date: string) {
   const supabaseAdmin = getSupabaseAdmin();
   logScheduleOperationStart("generate_today.load_existing_schedule", {
@@ -2361,120 +2259,6 @@ async function stopEnrollment(enrollmentId: string, stoppedReason: string) {
   }
 }
 
-function getSafetyStatus(
-  contact: HubSpotContactScheduleRow,
-  suppressionRules: SuppressionRuleRow[],
-  campaign: CampaignRow,
-  date: string,
-) {
-  if (!contact.email?.trim()) {
-    return {
-      safe: false,
-      terminal: false,
-      reason: "Missing email.",
-      safetyStatus: "missing_email",
-    };
-  }
-
-  if (contact.is_unsubscribed && campaign.stop_on_unsubscribe !== false) {
-    return {
-      safe: false,
-      terminal: true,
-      reason: "Contact is unsubscribed.",
-      safetyStatus: "unsubscribed",
-    };
-  }
-
-  for (const rule of suppressionRules) {
-    const suppressionType = rule.suppression_type.toLowerCase();
-
-    if (!suppressionTypes.has(suppressionType)) {
-      continue;
-    }
-
-    if (suppressionType === "snoozed" && rule.snoozed_until && rule.snoozed_until < date) {
-      continue;
-    }
-
-    if (
-      (suppressionType === "replied" || suppressionType === "reply") &&
-      campaign.stop_on_reply === false
-    ) {
-      continue;
-    }
-
-    if (
-      (suppressionType === "bounced" || suppressionType === "bounce") &&
-      campaign.stop_on_bounce === false
-    ) {
-      continue;
-    }
-
-    if (
-      (suppressionType === "unsubscribed" || suppressionType === "unsubscribe") &&
-      campaign.stop_on_unsubscribe === false
-    ) {
-      continue;
-    }
-
-    return {
-      safe: false,
-      terminal: suppressionType !== "snoozed",
-      reason: rule.reason || `Suppressed because contact is ${suppressionType}.`,
-      safetyStatus: suppressionType,
-    };
-  }
-
-  if (isWithinDays(contact.last_contacted_at, campaign.cooldown_days)) {
-    return {
-      safe: false,
-      terminal: false,
-      reason: `Contacted within the ${campaign.cooldown_days}-day cooldown.`,
-      safetyStatus: "contacted_too_recently",
-    };
-  }
-
-  return {
-    safe: true,
-    terminal: false,
-    reason: "Ready for review.",
-    safetyStatus: "safe",
-  };
-}
-
-function getBrokerDomain(contact: HubSpotContactScheduleRow) {
-  const rawProperties = contact.raw_properties ?? {};
-  const companyDomain =
-    rawProperties.company_domain ??
-    rawProperties.domain ??
-    rawProperties.website ??
-    rawProperties.hs_email_domain;
-
-  return (
-    normalizeDomain(companyDomain) ??
-    normalizeDomain(contact.email?.split("@")[1]) ??
-    "unknown-domain"
-  );
-}
-
-function normalizeDomain(value: string | null | undefined) {
-  const trimmedValue = value?.trim().toLowerCase();
-
-  if (!trimmedValue) {
-    return null;
-  }
-
-  try {
-    const parsedUrl = new URL(
-      trimmedValue.startsWith("http") ? trimmedValue : `https://${trimmedValue}`,
-    );
-
-    return parsedUrl.hostname.replace(/^www\./, "");
-  } catch {
-    return trimmedValue.replace(/^www\./, "").split("/")[0] || null;
-  }
-}
-
 function countStep(rows: DailySendPlanRow[], stepNumber: number) {
   return rows.filter((row) => row.campaign_steps?.step_number === stepNumber).length;
 }
@@ -2485,20 +2269,6 @@ function countRowsByStatus(rows: Array<{ status: string }>) {
 
     return counts;
   }, {});
-}
-
-function getCampaignTotalDailyLimit(campaign: CampaignRow) {
-  return normalizeDailyLimit(
-    campaign.daily_send_limit ?? campaign.daily_limit,
-    DEFAULT_TOTAL_DAILY_LIMIT,
-  );
-}
-
-function getCampaignNewContactLimit(campaign: CampaignRow) {
-  return normalizeDailyLimit(
-    campaign.new_contacts_per_day,
-    DEFAULT_NEW_CONTACTS_PER_DAY,
-  );
 }
 
 function chunkArray<T>(values: T[], chunkSize: number) {
@@ -2536,18 +2306,4 @@ function addDays(date: string, days: number) {
   nextDate.setUTCDate(nextDate.getUTCDate() + days);
 
   return nextDate.toISOString().slice(0, 10);
-}
-
-function isWithinDays(value: string | null, days: number) {
-  if (!value) {
-    return false;
-  }
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return false;
-  }
-
-  return Date.now() - date.getTime() <= days * 24 * 60 * 60 * 1000;
 }

@@ -13,6 +13,16 @@ import {
   getEmailComposeUrl,
   getFullEmailText,
 } from "@/lib/email-compose";
+import {
+  beginForecastRequest,
+  completeForecastRequest,
+  createLatestRequestGuard,
+  createForecastUiState,
+  failForecastRequest,
+  readForecastResponse,
+  runForecastAlongside,
+  runForecastRequest,
+} from "@/lib/workload-forecast-ui";
 
 type Client = {
   id: string;
@@ -126,6 +136,41 @@ type DailySendPlan = {
   ok?: boolean;
   message?: string;
 } & DailySendPlanDiagnostics;
+
+type WorkloadForecastDay = {
+  date: string;
+  stepCounts: Record<string, number>;
+  originallyDue: number;
+  rolledForwardBacklog: number;
+  totalProjected: number;
+  dailyCapacity: number;
+  remainingCapacity: number;
+  projectedOverflow: number;
+  constraints: {
+    accountCapacityOverflow: number;
+    campaignCapacityOverflow: number;
+    newContactIntake: number;
+    brokerDomain: number;
+    safetyEligibility: number;
+    terminalSuppression: number;
+  };
+  status: "Available capacity" | "Near capacity" | "Over capacity";
+};
+
+type WorkloadForecast = {
+  startDate: string;
+  endDate: string;
+  days: WorkloadForecastDay[];
+  stepNumbers: number[];
+  summary: {
+    totalForecastWorkload: number;
+    busiestDate: string | null;
+    busiestDateCount: number;
+    overCapacityDates: number;
+    projectedBacklogAfter30Days: number;
+  };
+  recommendation: string;
+};
 
 type Campaign = {
   id: string;
@@ -396,6 +441,21 @@ const emptyDailySendPlan: DailySendPlan = {
   campaignStepCount: 0,
   reason: null,
   schedule: [],
+};
+
+const emptyWorkloadForecast: WorkloadForecast = {
+  startDate: new Date().toISOString().slice(0, 10),
+  endDate: new Date().toISOString().slice(0, 10),
+  days: [],
+  stepNumbers: [1, 2, 3],
+  summary: {
+    totalForecastWorkload: 0,
+    busiestDate: null,
+    busiestDateCount: 0,
+    overCapacityDates: 0,
+    projectedBacklogAfter30Days: 0,
+  },
+  recommendation: "Forecast data is not available yet.",
 };
 
 const emptyEmailDraftSummary: EmailDraftSummary = {
@@ -969,6 +1029,13 @@ export default function Dashboard() {
   >([]);
   const [dailySendPlan, setDailySendPlan] =
     useState<DailySendPlan>(emptyDailySendPlan);
+  const [forecastUiState, setForecastUiState] = useState(() =>
+    createForecastUiState<WorkloadForecast>(),
+  );
+  const forecastRequestGuardRef = useRef(
+    createLatestRequestGuard(),
+  );
+  const workloadForecast = forecastUiState.data ?? emptyWorkloadForecast;
   const [dailyDrafts, setDailyDrafts] = useState<EmailDraft[]>([]);
   const [emailDraftSummary, setEmailDraftSummary] =
     useState<EmailDraftSummary>(emptyEmailDraftSummary);
@@ -1428,64 +1495,103 @@ export default function Dashboard() {
   }
 
   async function loadHubSpotDashboardData() {
-    try {
-      const [
-        statusResponse,
-        recommendationsResponse,
-        scheduleResponse,
-        draftsResponse,
-        sendingSettingsResponse,
-      ] =
-        await Promise.all([
-        fetch("/api/hubspot/status"),
-        fetch("/api/hubspot/recommendations"),
-        fetch("/api/campaign-schedule"),
-        fetch("/api/email-drafts"),
-        fetch("/api/sending-settings"),
-      ]);
+    const requestToken = startForecastRequest();
+    await runForecastAlongside({
+      forecast: async () =>
+        readForecastResponse<WorkloadForecast>(
+          await fetch("/api/workload-forecast"),
+        ),
+      other: async () => {
+        const [
+          statusResponse,
+          recommendationsResponse,
+          scheduleResponse,
+          draftsResponse,
+          sendingSettingsResponse,
+        ] = await Promise.all([
+          fetch("/api/hubspot/status"),
+          fetch("/api/hubspot/recommendations"),
+          fetch("/api/campaign-schedule"),
+          fetch("/api/email-drafts"),
+          fetch("/api/sending-settings"),
+        ]);
 
-      if (statusResponse.ok) {
-        const statusBody = (await statusResponse.json()) as {
-          connection: HubSpotStatus;
-          health: HubSpotHealth;
-        };
-
-        setHubSpotStatus(statusBody.connection);
-        setHubSpotHealth(statusBody.health);
-      }
-
-      if (recommendationsResponse.ok) {
-        const recommendationsBody = (await recommendationsResponse.json()) as {
-          recommendations: DailyRecommendation[];
-        };
-
-        setDailyRecommendations(recommendationsBody.recommendations);
-      }
-
-      if (scheduleResponse.ok) {
-        const scheduleBody = (await scheduleResponse.json()) as DailySendPlan;
-
-        setDailySendPlan(scheduleBody);
-      }
-
-      if (draftsResponse.ok) {
-        applyEmailDraftResponse(
-          (await draftsResponse.json()) as EmailDraftResponse,
-        );
-      }
-
-      if (sendingSettingsResponse.ok) {
-        const settingsBody =
-          (await sendingSettingsResponse.json()) as SendingSettingsResponse;
-
-        if (settingsBody.settings) {
-          setSendingSettings(settingsBody.settings);
-          setSendingSettingsForm(getSendingSettingsForm(settingsBody.settings));
+        if (statusResponse.ok) {
+          const statusBody = (await statusResponse.json()) as {
+            connection: HubSpotStatus;
+            health: HubSpotHealth;
+          };
+          setHubSpotStatus(statusBody.connection);
+          setHubSpotHealth(statusBody.health);
         }
-      }
-    } catch (hubSpotError) {
-      reportError("Unable to load HubSpot dashboard data", hubSpotError);
+        if (recommendationsResponse.ok) {
+          const body = (await recommendationsResponse.json()) as {
+            recommendations: DailyRecommendation[];
+          };
+          setDailyRecommendations(body.recommendations);
+        }
+        if (scheduleResponse.ok) {
+          setDailySendPlan(
+            (await scheduleResponse.json()) as DailySendPlan,
+          );
+        }
+        if (draftsResponse.ok) {
+          applyEmailDraftResponse(
+            (await draftsResponse.json()) as EmailDraftResponse,
+          );
+        }
+        if (sendingSettingsResponse.ok) {
+          const body =
+            (await sendingSettingsResponse.json()) as SendingSettingsResponse;
+          if (body.settings) {
+            setSendingSettings(body.settings);
+            setSendingSettingsForm(getSendingSettingsForm(body.settings));
+          }
+        }
+      },
+      onForecastSuccess: (forecast) =>
+        setForecastUiState(completeForecastRequest(forecast)),
+      onForecastFailure: (forecastError) =>
+        setForecastUiState((current) =>
+          failForecastRequest(current, forecastError.message),
+        ),
+      isForecastCurrent: () =>
+        forecastRequestGuardRef.current.isCurrent(requestToken),
+      onOtherSuccess: () => undefined,
+      onOtherFailure: (dashboardError) =>
+        reportError("Unable to load HubSpot dashboard data", dashboardError),
+    });
+  }
+
+  function startForecastRequest() {
+    const token = forecastRequestGuardRef.current.start();
+    if (forecastRequestGuardRef.current.isCurrent(token)) {
+      setForecastUiState((current) => beginForecastRequest(current));
     }
+    return token;
+  }
+
+  function requestWorkloadForecast(requestToken: number) {
+    return runForecastRequest({
+      request: async () =>
+        readForecastResponse<WorkloadForecast>(
+          await fetch("/api/workload-forecast"),
+        ),
+      onSuccess: (forecast) =>
+        setForecastUiState(completeForecastRequest(forecast)),
+      onFailure: (forecastError) => {
+        setForecastUiState((current) =>
+          failForecastRequest(current, forecastError.message),
+        );
+      },
+      isCurrent: () =>
+        forecastRequestGuardRef.current.isCurrent(requestToken),
+    });
+  }
+
+  async function retryWorkloadForecast() {
+    const requestToken = startForecastRequest();
+    await requestWorkloadForecast(requestToken);
   }
 
   function applyEmailDraftResponse(body: EmailDraftResponse) {
@@ -1840,9 +1946,13 @@ export default function Dashboard() {
 
   useEffect(() => {
     let isActive = true;
+    const forecastRequestGuard = forecastRequestGuardRef.current;
+    forecastRequestGuard.mount();
 
     window.setTimeout(() => {
       void (async () => {
+        const requestToken = startForecastRequest();
+        const forecastRequest = requestWorkloadForecast(requestToken);
         try {
           const [
             statusResponse,
@@ -1909,6 +2019,7 @@ export default function Dashboard() {
         } catch (hubSpotError) {
           reportError("Unable to load HubSpot dashboard data", hubSpotError);
         }
+        await forecastRequest;
       })();
     }, 0);
 
@@ -1987,6 +2098,7 @@ export default function Dashboard() {
 
     return () => {
       isActive = false;
+      forecastRequestGuard.unmount();
     };
   }, []);
 
@@ -3197,6 +3309,225 @@ export default function Dashboard() {
               {" contacts rolled forward safely."}
             </p>
           )}
+
+          <section className="mt-5 overflow-hidden rounded-2xl border border-cyan-100 bg-cyan-50/50">
+            <div className="border-b border-cyan-100 bg-white px-4 py-4 sm:px-5">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                    Upcoming Workload
+                  </p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-950">
+                    30-day capacity forecast
+                  </h3>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">
+                    Forecast only. Nothing is scheduled or sent until you
+                    generate a daily plan.
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    Projected follow-up dates assume each email is manually sent
+                    on its projected date. Actual dates may change if it is sent
+                    later.
+                  </p>
+                </div>
+                {forecastUiState.data && (
+                  <div className="max-w-xl rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm font-medium text-cyan-950">
+                    {workloadForecast.recommendation}
+                  </div>
+                )}
+              </div>
+
+              {forecastUiState.status === "loading" && !forecastUiState.data && (
+                <p className="mt-4 text-sm font-medium text-cyan-900">
+                  Loading 30-day forecast...
+                </p>
+              )}
+              {forecastUiState.status === "loading" && forecastUiState.data && (
+                <p className="mt-4 text-sm font-medium text-cyan-900">
+                  Refreshing forecast...
+                </p>
+              )}
+              {forecastUiState.error && (
+                <div className="mt-4 flex flex-col gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900 sm:flex-row sm:items-center sm:justify-between">
+                  <p>
+                    {forecastUiState.error}
+                    {forecastUiState.stale
+                      ? " Previously loaded results are shown below and may be stale."
+                      : ""}
+                  </p>
+                  <button
+                    className="rounded-lg bg-rose-900 px-3 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={forecastUiState.status === "loading"}
+                    onClick={() => void retryWorkloadForecast()}
+                    type="button"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              {forecastUiState.status === "empty" && (
+                <p className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm font-medium text-slate-700">
+                  No projected workload.
+                </p>
+              )}
+
+              {forecastUiState.data && (
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Forecast workload
+                  </p>
+                  <p className="mt-1 text-xl font-semibold text-slate-950">
+                    {workloadForecast.summary.totalForecastWorkload}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Busiest date
+                  </p>
+                  <p className="mt-1 text-xl font-semibold text-slate-950">
+                    {workloadForecast.summary.busiestDate
+                      ? `${formatDate(
+                          workloadForecast.summary.busiestDate,
+                        )} · ${workloadForecast.summary.busiestDateCount}`
+                      : "No workload"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Over-capacity dates
+                  </p>
+                  <p className="mt-1 text-xl font-semibold text-slate-950">
+                    {workloadForecast.summary.overCapacityDates}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Backlog after 30 days
+                  </p>
+                  <p className="mt-1 text-xl font-semibold text-slate-950">
+                    {workloadForecast.summary.projectedBacklogAfter30Days}
+                  </p>
+                </div>
+              </div>
+              )}
+            </div>
+
+            {forecastUiState.data && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-left text-xs">
+                <thead className="bg-slate-100 text-slate-600">
+                  <tr>
+                    <th className="whitespace-nowrap px-3 py-2.5 font-semibold">
+                      Date
+                    </th>
+                    {workloadForecast.stepNumbers.map((stepNumber) => (
+                      <th
+                        className="whitespace-nowrap px-3 py-2.5 text-center font-semibold"
+                        key={stepNumber}
+                      >
+                        Email {stepNumber}
+                      </th>
+                    ))}
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Due
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Backlog
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Total
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Remaining
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Account overflow
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Campaign
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Intake
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Broker
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Safety
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-center font-semibold">
+                      Suppressed
+                    </th>
+                    <th className="whitespace-nowrap px-3 py-2.5 font-semibold">
+                      Status
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {workloadForecast.days.map((day) => (
+                    <tr key={day.date}>
+                      <td className="whitespace-nowrap px-3 py-2.5 font-medium text-slate-900">
+                        {formatDate(day.date)}
+                      </td>
+                      {workloadForecast.stepNumbers.map((stepNumber) => (
+                        <td
+                          className="px-3 py-2.5 text-center text-slate-700"
+                          key={stepNumber}
+                        >
+                          {day.stepCounts[String(stepNumber)] ?? 0}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.originallyDue}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.rolledForwardBacklog}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 text-center font-semibold text-slate-950">
+                        {day.totalProjected} of {day.dailyCapacity}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.remainingCapacity}
+                      </td>
+                      <td className="px-3 py-2.5 text-center font-semibold text-amber-700">
+                        {day.projectedOverflow}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.constraints.campaignCapacityOverflow}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.constraints.newContactIntake}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.constraints.brokerDomain}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.constraints.safetyEligibility}
+                      </td>
+                      <td className="px-3 py-2.5 text-center text-slate-700">
+                        {day.constraints.terminalSuppression}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 font-semibold ${
+                            day.status === "Over capacity"
+                              ? "bg-rose-100 text-rose-800"
+                              : day.status === "Near capacity"
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-emerald-100 text-emerald-800"
+                          }`}
+                        >
+                          {day.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            )}
+          </section>
 
           {dailySendPlan.summary.totalScheduled === 0 && (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-900">
