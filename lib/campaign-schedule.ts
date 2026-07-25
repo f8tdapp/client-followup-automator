@@ -1,4 +1,15 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import {
+  applySchedulingPolicy,
+  DEFAULT_NEW_CONTACTS_PER_DAY,
+  DEFAULT_TOTAL_DAILY_LIMIT,
+  generateUnlessPlanExists,
+  loadAllDeterministicPages,
+  normalizeDailyLimit,
+  persistScheduleOutcomes,
+  runTwoPhaseGeneration,
+  ScheduleCandidate,
+} from "@/lib/schedule-policy";
 
 type CampaignRow = {
   id: string;
@@ -7,6 +18,7 @@ type CampaignRow = {
   status: string;
   daily_limit: number;
   daily_send_limit: number | null;
+  new_contacts_per_day: number | null;
   broker_domain_daily_limit: number | null;
   cooldown_days: number;
   stop_on_reply: boolean | null;
@@ -30,6 +42,27 @@ type DefaultCampaignStep = {
   subject_template: string;
   body_template: string;
   status: string;
+};
+
+type CampaignStepRepairRow = DefaultCampaignStep & {
+  campaign_id: string;
+  updated_at: string;
+};
+
+type PreparedCampaignInput = {
+  campaign: CampaignRow;
+  enrollments: EnrollmentRow[];
+  contacts: Map<string, HubSpotContactScheduleRow>;
+  suppressionRules: Map<string, SuppressionRuleRow[]>;
+};
+
+type PreparedDailyGeneration = {
+  campaigns: CampaignRow[];
+  existingSteps: CampaignStepRow[];
+  stepRepairs: CampaignStepRepairRow[];
+  campaignInputs: PreparedCampaignInput[];
+  existingScheduled: Awaited<ReturnType<typeof getExistingScheduledCounts>>;
+  domainLimits: Map<string, number>;
 };
 
 type HubSpotContactScheduleRow = {
@@ -137,6 +170,11 @@ export type DailySendPlanSummary = {
   dueEmail1: number;
   dueEmail2: number;
   dueEmail3: number;
+  totalDailyLimit: number;
+  rolledForwardTotalLimit: number;
+  rolledForwardNewContactLimit: number;
+  rolledForwardSafetyLimit: number;
+  stoppedByTerminalSuppression: number;
 };
 
 export type DailySendPlanDiagnostics = {
@@ -172,11 +210,20 @@ const suppressionTypes = new Set([
   "do_not_contact",
   "snoozed",
 ]);
+const terminalSuppressionStatuses = new Set([
+  "replied",
+  "reply",
+  "bounced",
+  "bounce",
+  "unsubscribed",
+  "unsubscribe",
+  "do_not_contact",
+]);
 const suppressionDiagnosticsWarning =
   "Could not read contact_suppression_rules diagnostics.";
 const contactLookupChunkSize = 25;
 const scheduleContactLookupChunkSize = 25;
-const maxDueEnrollmentsPerCampaign = 250;
+const dueEnrollmentPageSize = 250;
 
 export function createEmptyDailySendPlan(
   date = getTodayDate(),
@@ -205,6 +252,11 @@ export function createEmptyDailySendPlan(
       dueEmail1: 0,
       dueEmail2: 0,
       dueEmail3: 0,
+      totalDailyLimit: DEFAULT_TOTAL_DAILY_LIMIT,
+      rolledForwardTotalLimit: 0,
+      rolledForwardNewContactLimit: 0,
+      rolledForwardSafetyLimit: 0,
+      stoppedByTerminalSuppression: 0,
     },
     diagnostics,
     ...diagnostics,
@@ -213,6 +265,14 @@ export function createEmptyDailySendPlan(
 }
 
 export async function generateDailySendSchedule(date = getTodayDate()) {
+  return generateUnlessPlanExists({
+    hasExistingPlan: () => hasExistingScheduleRows(date),
+    loadExistingPlan: () => getDailySendPlan(date),
+    generateNewPlan: () => generateNewDailySendSchedule(date),
+  });
+}
+
+async function generateNewDailySendSchedule(date: string) {
   let currentOperation = "generate_today.start";
 
   logScheduleOperationStart("generate_today.start", {
@@ -234,181 +294,10 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
       );
     }
 
-    currentOperation = "generate_today.ensure_steps";
-    const steps = await runNamedScheduleOperation("generate_today.ensure_steps", () =>
-      ensureCampaignSteps(campaigns),
-    );
-    logScheduleOperationSuccess("generate_today.after_ensure_steps", {
-      stepCount: steps.length,
-    });
-
-    currentOperation = "generate_today.load_existing_schedule";
-    const existingScheduled = await getExistingScheduledCounts(date);
-    currentOperation = "generate_today.build_rows";
-    const brokerDomainCounts = new Map(existingScheduled.brokerDomainCounts);
-    const campaignCounts = new Map(existingScheduled.campaignCounts);
-    const existingScheduleKeys = new Set(existingScheduled.existingScheduleKeys);
-    let skippedAlreadyScheduled = 0;
-    currentOperation = "generate_today.compute_domain_limits";
-    const domainLimits = await getBrokerDomainLimits();
-
-    for (const campaign of campaigns) {
-      currentOperation = "generate_today.build_rows";
-      const campaignSteps = runNamedScheduleStep(
-        "generate_today.build_rows",
-        () =>
-          steps
-            .filter((step) => step.campaign_id === campaign.id)
-            .sort((left, right) => left.step_number - right.step_number),
-      );
-      const campaignLimit = campaign.daily_send_limit ?? campaign.daily_limit;
-      const dueEnrollmentLimit = getDueEnrollmentLimit(campaignLimit);
-      currentOperation = "generate_today.load_enrollments";
-      const enrollments = await getDueEnrollments(
-        campaign.id,
-        date,
-        dueEnrollmentLimit,
-      );
-
-      if (enrollments.length === 0) {
-        continue;
-      }
-
-      currentOperation = "generate_today.load_contacts";
-      const contacts = await getContactsById(
-        enrollments.map((enrollment) => enrollment.contact_id),
-      );
-      currentOperation = "generate_today.load_suppression_rules";
-      const suppressionRules = await getSuppressionRules(
-        enrollments.map((enrollment) => enrollment.contact_id),
-        "generate_today.load_suppression_rules",
-      );
-
-      for (const enrollment of enrollments) {
-        currentOperation = "generate_today.build_rows";
-        const { contact, step } = runNamedScheduleStep(
-          "generate_today.build_rows",
-          () => ({
-            contact: contacts.get(enrollment.contact_id),
-            step: campaignSteps.find(
-              (campaignStep) =>
-                campaignStep.step_number === enrollment.current_step,
-            ),
-          }),
-        );
-
-        if (!contact || !step) {
-          currentOperation = "generate_today.upsert_schedule";
-          await stopEnrollment(enrollment.id, "missing_campaign_step");
-          continue;
-        }
-
-        const scheduleKey = getScheduleConflictKey({
-          contactId: contact.id,
-          campaignId: campaign.id,
-          campaignStepId: step.id,
-          scheduledDate: date,
-        });
-
-        if (existingScheduleKeys.has(scheduleKey)) {
-          skippedAlreadyScheduled += 1;
-          console.info("[campaign-schedule] skipped because already scheduled", {
-            operation: "generate_today.build_rows",
-            scheduledDate: date,
-            skippedAlreadyScheduled,
-          });
-          continue;
-        }
-
-        const brokerDomain = getBrokerDomain(contact);
-        const safety = getSafetyStatus(
-          contact,
-          suppressionRules.get(contact.id) ?? [],
-          campaign,
-          date,
-        );
-
-        if (!safety.safe) {
-          currentOperation = "generate_today.upsert_schedule";
-          await upsertScheduleRow({
-            contactId: contact.id,
-            campaignId: campaign.id,
-            campaignStepId: step.id,
-            scheduledDate: date,
-            brokerDomain,
-            status: "skipped",
-            reason: safety.reason,
-            safetyStatus: safety.safetyStatus,
-          });
-          existingScheduleKeys.add(scheduleKey);
-          await rollEnrollmentForward(enrollment.id, date, 1);
-          continue;
-        }
-
-        const campaignCount = campaignCounts.get(campaign.id) ?? 0;
-
-        if (campaignCount >= campaignLimit) {
-          currentOperation = "generate_today.upsert_schedule";
-          await upsertScheduleRow({
-            contactId: contact.id,
-            campaignId: campaign.id,
-            campaignStepId: step.id,
-            scheduledDate: date,
-            brokerDomain,
-            status: "skipped",
-            reason: "Campaign daily send limit reached.",
-            safetyStatus: "campaign_limit_reached",
-          });
-          existingScheduleKeys.add(scheduleKey);
-          await rollEnrollmentForward(enrollment.id, date, 1);
-          continue;
-        }
-
-        const brokerLimit =
-          domainLimits.get(brokerDomain) ??
-          campaign.broker_domain_daily_limit ??
-          3;
-        const brokerCount = brokerDomainCounts.get(brokerDomain) ?? 0;
-
-        if (brokerCount >= brokerLimit) {
-          currentOperation = "generate_today.upsert_schedule";
-          await upsertScheduleRow({
-            contactId: contact.id,
-            campaignId: campaign.id,
-            campaignStepId: step.id,
-            scheduledDate: date,
-            brokerDomain,
-            status: "skipped",
-            reason: "Broker domain daily limit reached.",
-            safetyStatus: "broker_domain_limit_reached",
-          });
-          existingScheduleKeys.add(scheduleKey);
-          await rollEnrollmentForward(enrollment.id, date, 1);
-          continue;
-        }
-
-        currentOperation = "generate_today.upsert_schedule";
-        await upsertScheduleRow({
-          contactId: contact.id,
-          campaignId: campaign.id,
-          campaignStepId: step.id,
-          scheduledDate: date,
-          brokerDomain,
-          status: "scheduled",
-          reason: `Ready for Email ${step.step_number}.`,
-          safetyStatus: "safe",
-        });
-        existingScheduleKeys.add(scheduleKey);
-        brokerDomainCounts.set(brokerDomain, brokerCount + 1);
-        campaignCounts.set(campaign.id, campaignCount + 1);
-      }
-    }
-
-    console.info("[campaign-schedule] existing schedule guard summary", {
-      operation: "generate_today.build_rows",
-      scheduledDate: date,
-      skippedAlreadyScheduled,
-      existingScheduleKeyCount: existingScheduleKeys.size,
+    currentOperation = "generate_today.prepare";
+    const brokerDomainCounts = await runTwoPhaseGeneration({
+      prepare: () => prepareDailyGeneration(campaigns, date),
+      persist: (prepared) => persistPreparedDailyGeneration(prepared, date),
     });
 
     currentOperation = "generate_today.compute_domain_limits";
@@ -461,6 +350,166 @@ export async function generateDailySendSchedule(date = getTodayDate()) {
   }
 }
 
+async function prepareDailyGeneration(
+  campaigns: CampaignRow[],
+  date: string,
+): Promise<PreparedDailyGeneration> {
+  const preparedSteps = await prepareCampaignSteps(campaigns);
+  const [existingScheduled, domainLimits] = await Promise.all([
+    getExistingScheduledCounts(date),
+    getBrokerDomainLimits(),
+  ]);
+  const campaignInputs: PreparedCampaignInput[] = [];
+
+  for (const campaign of campaigns) {
+    const stepNumbers = [
+      ...preparedSteps.existingSteps
+        .filter((step) => step.campaign_id === campaign.id)
+        .map((step) => step.step_number),
+      ...preparedSteps.stepRepairs
+        .filter((step) => step.campaign_id === campaign.id)
+        .map((step) => step.step_number),
+    ];
+    const enrollments = await getDueEnrollments(
+      campaign.id,
+      date,
+      Math.max(...stepNumbers, 3),
+    );
+    const contactIds = enrollments.map((enrollment) => enrollment.contact_id);
+    const [contacts, suppressionRules] = await Promise.all([
+      getContactsById(contactIds),
+      getSuppressionRules(contactIds, "generate_today.load_suppression_rules"),
+    ]);
+
+    campaignInputs.push(
+      Object.freeze({
+        campaign,
+        enrollments: Object.freeze([...enrollments]) as unknown as EnrollmentRow[],
+        contacts,
+        suppressionRules,
+      }),
+    );
+  }
+
+  return Object.freeze({
+    campaigns: Object.freeze([...campaigns]) as unknown as CampaignRow[],
+    existingSteps: Object.freeze([
+      ...preparedSteps.existingSteps,
+    ]) as unknown as CampaignStepRow[],
+    stepRepairs: Object.freeze([
+      ...preparedSteps.stepRepairs,
+    ]) as unknown as CampaignStepRepairRow[],
+    campaignInputs: Object.freeze([
+      ...campaignInputs,
+    ]) as unknown as PreparedCampaignInput[],
+    existingScheduled,
+    domainLimits,
+  });
+}
+
+async function persistPreparedDailyGeneration(
+  prepared: PreparedDailyGeneration,
+  date: string,
+) {
+  const repairedSteps = await persistCampaignStepRepairs(prepared.stepRepairs);
+  const steps = mergeCampaignSteps(prepared.existingSteps, repairedSteps);
+  const brokerDomainCounts = new Map(
+    prepared.existingScheduled.brokerDomainCounts,
+  );
+  const campaignCounts = new Map(prepared.existingScheduled.campaignCounts);
+  const campaignNewContactCounts = new Map(
+    prepared.existingScheduled.campaignNewContactCounts,
+  );
+
+  for (const input of prepared.campaignInputs) {
+    const campaignSteps = steps
+      .filter((step) => step.campaign_id === input.campaign.id)
+      .sort((left, right) => left.step_number - right.step_number);
+    const candidates: ScheduleCandidate[] = [];
+
+    for (const enrollment of input.enrollments) {
+      const contact = input.contacts.get(enrollment.contact_id);
+      const step = campaignSteps.find(
+        (campaignStep) => campaignStep.step_number === enrollment.current_step,
+      );
+
+      if (!contact || !step) {
+        await stopEnrollment(enrollment.id, "missing_campaign_step");
+        continue;
+      }
+
+      const brokerDomain = getBrokerDomain(contact);
+      const safety = getSafetyStatus(
+        contact,
+        input.suppressionRules.get(contact.id) ?? [],
+        input.campaign,
+        date,
+      );
+
+      candidates.push({
+        id: enrollment.id,
+        enrollmentId: enrollment.id,
+        contactId: contact.id,
+        campaignId: input.campaign.id,
+        campaignStepId: step.id,
+        current_step: step.step_number,
+        next_send_date: enrollment.next_send_date,
+        brokerDomain,
+        brokerDomainLimit:
+          prepared.domainLimits.get(brokerDomain) ??
+          input.campaign.broker_domain_daily_limit ??
+          3,
+        restriction: safety.safe
+          ? { kind: "safe" }
+          : {
+              kind: safety.terminal ? "stop" : "roll_forward",
+              reason: safety.reason,
+              safetyStatus: safety.safetyStatus,
+            },
+      });
+    }
+
+    const policyResult = applySchedulingPolicy(candidates, {
+      totalDailyLimit: getCampaignTotalDailyLimit(input.campaign),
+      newContactsPerDay: getCampaignNewContactLimit(input.campaign),
+      existingScheduled: campaignCounts.get(input.campaign.id) ?? 0,
+      existingNewContacts:
+        campaignNewContactCounts.get(input.campaign.id) ?? 0,
+      brokerDomainCounts,
+    });
+
+    await persistScheduleOutcomes(policyResult.outcomes, {
+      writeSchedule: (outcome) =>
+        upsertScheduleRow({
+          contactId: outcome.contactId,
+          campaignId: outcome.campaignId,
+          campaignStepId: outcome.campaignStepId,
+          scheduledDate: date,
+          brokerDomain: outcome.brokerDomain,
+          status: outcome.status,
+          reason: outcome.reason,
+          safetyStatus: outcome.safetyStatus,
+        }),
+      rollForwardEnrollment: (outcome) =>
+        rollEnrollmentForward(outcome.enrollmentId, date, 1),
+      stopEnrollment: (outcome) =>
+        stopEnrollment(outcome.enrollmentId, outcome.safetyStatus),
+    });
+
+    campaignCounts.set(input.campaign.id, policyResult.scheduledCount);
+    campaignNewContactCounts.set(
+      input.campaign.id,
+      policyResult.newContactCount,
+    );
+    brokerDomainCounts.clear();
+    for (const [domain, count] of policyResult.brokerDomainCounts) {
+      brokerDomainCounts.set(domain, count);
+    }
+  }
+
+  return brokerDomainCounts;
+}
+
 export async function getDailySendPlan(date = getTodayDate()) {
   const supabaseAdmin = getSupabaseAdmin();
   logScheduleOperationStart("daily_send_schedule.select_today", {
@@ -494,6 +543,7 @@ export async function getDailySendPlan(date = getTodayDate()) {
 
   const rows = await enrichDailySendScheduleRows(data ?? []);
   const scheduledRows = rows.filter((row) => row.status === "scheduled");
+  const activeCampaigns = await getActiveCampaigns();
   const summary = {
     scheduledDate: date,
     totalScheduled: scheduledRows.length,
@@ -506,6 +556,26 @@ export async function getDailySendPlan(date = getTodayDate()) {
     dueEmail1: countStep(scheduledRows, 1),
     dueEmail2: countStep(scheduledRows, 2),
     dueEmail3: countStep(scheduledRows, 3),
+    totalDailyLimit: activeCampaigns.reduce(
+      (total, campaign) => total + getCampaignTotalDailyLimit(campaign),
+      0,
+    ) || DEFAULT_TOTAL_DAILY_LIMIT,
+    rolledForwardTotalLimit: rows.filter(
+      (row) => row.safety_status === "campaign_limit_reached",
+    ).length,
+    rolledForwardNewContactLimit: rows.filter(
+      (row) => row.safety_status === "new_contact_limit_reached",
+    ).length,
+    rolledForwardSafetyLimit: rows.filter(
+      (row) =>
+        row.status !== "scheduled" &&
+        row.safety_status !== "campaign_limit_reached" &&
+        row.safety_status !== "new_contact_limit_reached" &&
+        !terminalSuppressionStatuses.has(row.safety_status),
+    ).length,
+    stoppedByTerminalSuppression: rows.filter((row) =>
+      terminalSuppressionStatuses.has(row.safety_status),
+    ).length,
   };
   const diagnostics = await getSafeScheduleDiagnostics(date, summary, rows);
 
@@ -529,7 +599,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
       supabaseAdmin
         .from("campaigns")
         .select(
-          "id,name,description,status,daily_limit,daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
         )
         .eq("name", "Real Estate Agent Follow-Up")
         .limit(1)
@@ -559,6 +629,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
             status: "active",
             daily_limit: 25,
             daily_send_limit: 25,
+            new_contacts_per_day: 8,
             broker_domain_daily_limit: 3,
             cooldown_days: 14,
             stop_on_reply: true,
@@ -568,7 +639,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
           })
           .eq("id", campaign.id)
           .select(
-            "id,name,description,status,daily_limit,daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
           )
           .single<CampaignRow>(),
     );
@@ -597,6 +668,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
             status: "active",
             daily_limit: 25,
             daily_send_limit: 25,
+            new_contacts_per_day: 8,
             broker_domain_daily_limit: 3,
             cooldown_days: 14,
             stop_on_reply: true,
@@ -605,7 +677,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
             updated_at: new Date().toISOString(),
           })
           .select(
-            "id,name,description,status,daily_limit,daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
           )
           .single<CampaignRow>(),
     );
@@ -680,7 +752,7 @@ export async function resetStarterCampaignCopy(date = getTodayDate()) {
       supabaseAdmin
         .from("campaigns")
         .select(
-          "id,name,description,status,daily_limit,daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
         )
         .eq("name", "Real Estate Agent Follow-Up")
         .limit(1)
@@ -754,7 +826,7 @@ async function getActiveCampaigns() {
     supabaseAdmin
       .from("campaigns")
       .select(
-        "id,name,description,status,daily_limit,daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+        "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
       )
       .eq("status", "active")
       .order("created_at", { ascending: true })
@@ -780,6 +852,7 @@ async function assertCampaignScheduleSchema() {
   logScheduleOperationStart("campaigns.schema_check", {
     columns: [
       "daily_send_limit",
+      "new_contacts_per_day",
       "broker_domain_daily_limit",
       "cooldown_days",
       "stop_on_reply",
@@ -791,7 +864,7 @@ async function assertCampaignScheduleSchema() {
     supabaseAdmin
       .from("campaigns")
       .select(
-        "daily_send_limit,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+        "daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
       )
       .limit(1),
   );
@@ -825,6 +898,7 @@ function isMissingCampaignScheduleSchemaError(error: SupabaseErrorLike) {
 
   return (
     haystack.includes("daily_send_limit") ||
+    haystack.includes("new_contacts_per_day") ||
     haystack.includes("broker_domain_daily_limit") ||
     haystack.includes("stop_on_reply") ||
     haystack.includes("stop_on_bounce") ||
@@ -884,24 +958,6 @@ async function runNamedScheduleOperation<T>(
 
   try {
     const result = await task();
-
-    logScheduleOperationSuccess(operation);
-
-    return result;
-  } catch (error) {
-    throw createCampaignScheduleOperationError(
-      "Campaign schedule operation failed",
-      operation,
-      getOperationError(error),
-    );
-  }
-}
-
-function runNamedScheduleStep<T>(operation: string, task: () => T) {
-  logScheduleOperationStart(operation);
-
-  try {
-    const result = task();
 
     logScheduleOperationSuccess(operation);
 
@@ -1031,6 +1087,13 @@ function logScheduleOperationError(
 }
 
 async function ensureCampaignSteps(campaigns: CampaignRow[]) {
+  const prepared = await prepareCampaignSteps(campaigns);
+  const repairedSteps = await persistCampaignStepRepairs(prepared.stepRepairs);
+
+  return mergeCampaignSteps(prepared.existingSteps, repairedSteps);
+}
+
+async function prepareCampaignSteps(campaigns: CampaignRow[]) {
   const supabaseAdmin = getSupabaseAdmin();
   logScheduleOperationStart("campaign_steps.select_existing", {
     campaignCount: campaigns.length,
@@ -1060,7 +1123,7 @@ async function ensureCampaignSteps(campaigns: CampaignRow[]) {
   });
 
   const existingSteps = data ?? [];
-  const defaultStepRows = campaigns.flatMap((campaign) => {
+  const stepRepairs: CampaignStepRepairRow[] = campaigns.flatMap((campaign) => {
     const existingStepNumbers = new Set(
       existingSteps
         .filter((step) => step.campaign_id === campaign.id)
@@ -1085,19 +1148,24 @@ async function ensureCampaignSteps(campaigns: CampaignRow[]) {
     return [...repairableSteps, ...missingSteps];
   });
 
-  if (defaultStepRows.length === 0) {
-    return existingSteps;
+  return { existingSteps, stepRepairs };
+}
+
+async function persistCampaignStepRepairs(stepRepairs: CampaignStepRepairRow[]) {
+  if (stepRepairs.length === 0) {
+    return [];
   }
 
+  const supabaseAdmin = getSupabaseAdmin();
   logScheduleOperationStart("campaign_steps.upsert_defaults", {
-    stepCount: defaultStepRows.length,
+    stepCount: stepRepairs.length,
   });
   const { data: upsertedSteps, error: upsertError } = await runScheduleQuery(
     "campaign_steps.upsert_defaults",
     () =>
       supabaseAdmin
         .from("campaign_steps")
-        .upsert(defaultStepRows, { onConflict: "campaign_id,step_number" })
+        .upsert(stepRepairs, { onConflict: "campaign_id,step_number" })
         .select("*")
         .returns<CampaignStepRow[]>(),
   );
@@ -1113,7 +1181,23 @@ async function ensureCampaignSteps(campaigns: CampaignRow[]) {
     upsertedStepCount: upsertedSteps?.length ?? 0,
   });
 
-  return [...existingSteps, ...(upsertedSteps ?? [])];
+  return upsertedSteps ?? [];
+}
+
+function mergeCampaignSteps(
+  existingSteps: CampaignStepRow[],
+  repairedSteps: CampaignStepRow[],
+) {
+  const repairedKeys = new Set(
+    repairedSteps.map((step) => `${step.campaign_id}:${step.step_number}`),
+  );
+
+  return [
+    ...existingSteps.filter(
+      (step) => !repairedKeys.has(`${step.campaign_id}:${step.step_number}`),
+    ),
+    ...repairedSteps,
+  ];
 }
 
 function getDefaultCampaignStep(stepNumber: number): DefaultCampaignStep {
@@ -1788,44 +1872,50 @@ async function loadDailyScheduleContacts(contactIds: string[]) {
 async function getDueEnrollments(
   campaignId: string,
   date: string,
-  limit: number,
+  maxStepNumber: number,
 ) {
   const supabaseAdmin = getSupabaseAdmin();
   logScheduleOperationStart("generate_today.load_enrollments", {
     campaignId,
     scheduledDate: date,
-    limit,
+    pageSize: dueEnrollmentPageSize,
   });
-  const { data, error } = await runScheduleQuery(
-    "generate_today.load_enrollments",
-    () =>
-      supabaseAdmin
-        .from("contact_campaign_enrollments")
-        .select("*")
-        .eq("campaign_id", campaignId)
-        .eq("status", "active")
-        .lte("next_send_date", date)
-        .lte("current_step", 3)
-        .order("next_send_date", { ascending: true })
-        .limit(limit)
-        .returns<EnrollmentRow[]>(),
-  );
-
-  if (error) {
-    throw createCampaignScheduleOperationError(
-      "Due enrollment load failed",
+  const data = await loadAllDeterministicPages(async (from, to) => {
+    const { data: page, error } = await runScheduleQuery(
       "generate_today.load_enrollments",
-      error,
+      () =>
+        supabaseAdmin
+          .from("contact_campaign_enrollments")
+          .select("*")
+          .eq("campaign_id", campaignId)
+          .eq("status", "active")
+          .lte("next_send_date", date)
+          .lte("current_step", maxStepNumber)
+          .order("current_step", { ascending: false })
+          .order("next_send_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to)
+          .returns<EnrollmentRow[]>(),
     );
-  }
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Due enrollment load failed",
+        "generate_today.load_enrollments",
+        error,
+      );
+    }
+
+    return page ?? [];
+  }, dueEnrollmentPageSize);
+
   logScheduleOperationSuccess("generate_today.load_enrollments", {
     campaignId,
-    enrollmentCount: data?.length ?? 0,
-    eligibleEnrollmentsCount: data?.length ?? 0,
-    limit,
+    enrollmentCount: data.length,
+    eligibleEnrollmentsCount: data.length,
   });
 
-  return data ?? [];
+  return data;
 }
 
 async function getContactsById(contactIds: string[]) {
@@ -2068,7 +2158,7 @@ async function getExistingScheduledCounts(date: string) {
     () =>
       supabaseAdmin
         .from("daily_send_schedule")
-        .select("broker_domain,campaign_id,campaign_step_id,contact_id,scheduled_date,status")
+        .select("broker_domain,campaign_id,campaign_step_id,contact_id,scheduled_date,status,campaign_steps(step_number)")
         .eq("scheduled_date", date)
         .returns<
           Array<{
@@ -2078,6 +2168,7 @@ async function getExistingScheduledCounts(date: string) {
             contact_id: string;
             scheduled_date: string;
             status: string;
+            campaign_steps: { step_number: number } | null;
           }>
         >(),
   );
@@ -2092,6 +2183,7 @@ async function getExistingScheduledCounts(date: string) {
 
   const brokerDomainCounts = new Map<string, number>();
   const campaignCounts = new Map<string, number>();
+  const campaignNewContactCounts = new Map<string, number>();
   const existingScheduleKeys = new Set<string>();
 
   for (const row of data ?? []) {
@@ -2113,6 +2205,12 @@ async function getExistingScheduledCounts(date: string) {
       (brokerDomainCounts.get(row.broker_domain) ?? 0) + 1,
     );
     campaignCounts.set(row.campaign_id, (campaignCounts.get(row.campaign_id) ?? 0) + 1);
+    if (row.campaign_steps?.step_number === 1) {
+      campaignNewContactCounts.set(
+        row.campaign_id,
+        (campaignNewContactCounts.get(row.campaign_id) ?? 0) + 1,
+      );
+    }
   }
   logScheduleOperationSuccess("generate_today.load_existing_schedule", {
     rowCount: data?.length ?? 0,
@@ -2123,7 +2221,36 @@ async function getExistingScheduledCounts(date: string) {
     existingScheduleKeyCount: existingScheduleKeys.size,
   });
 
-  return { brokerDomainCounts, campaignCounts, existingScheduleKeys };
+  return {
+    brokerDomainCounts,
+    campaignCounts,
+    campaignNewContactCounts,
+    existingScheduleKeys,
+  };
+}
+
+async function hasExistingScheduleRows(date: string) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const { data, error } = await runScheduleQuery(
+    "generate_today.check_existing_plan",
+    () =>
+      supabaseAdmin
+        .from("daily_send_schedule")
+        .select("id")
+        .eq("scheduled_date", date)
+        .limit(1)
+        .returns<Array<{ id: string }>>(),
+  );
+
+  if (error) {
+    throw createCampaignScheduleOperationError(
+      "Existing plan check failed",
+      "generate_today.check_existing_plan",
+      error,
+    );
+  }
+
+  return (data?.length ?? 0) > 0;
 }
 
 function getScheduleConflictKey({
@@ -2243,6 +2370,7 @@ function getSafetyStatus(
   if (!contact.email?.trim()) {
     return {
       safe: false,
+      terminal: false,
       reason: "Missing email.",
       safetyStatus: "missing_email",
     };
@@ -2251,6 +2379,7 @@ function getSafetyStatus(
   if (contact.is_unsubscribed && campaign.stop_on_unsubscribe !== false) {
     return {
       safe: false,
+      terminal: true,
       reason: "Contact is unsubscribed.",
       safetyStatus: "unsubscribed",
     };
@@ -2290,6 +2419,7 @@ function getSafetyStatus(
 
     return {
       safe: false,
+      terminal: suppressionType !== "snoozed",
       reason: rule.reason || `Suppressed because contact is ${suppressionType}.`,
       safetyStatus: suppressionType,
     };
@@ -2298,6 +2428,7 @@ function getSafetyStatus(
   if (isWithinDays(contact.last_contacted_at, campaign.cooldown_days)) {
     return {
       safe: false,
+      terminal: false,
       reason: `Contacted within the ${campaign.cooldown_days}-day cooldown.`,
       safetyStatus: "contacted_too_recently",
     };
@@ -2305,6 +2436,7 @@ function getSafetyStatus(
 
   return {
     safe: true,
+    terminal: false,
     reason: "Ready for review.",
     safetyStatus: "safe",
   };
@@ -2355,10 +2487,17 @@ function countRowsByStatus(rows: Array<{ status: string }>) {
   }, {});
 }
 
-function getDueEnrollmentLimit(campaignDailyLimit: number) {
-  return Math.min(
-    Math.max(campaignDailyLimit * 10, campaignDailyLimit + 50),
-    maxDueEnrollmentsPerCampaign,
+function getCampaignTotalDailyLimit(campaign: CampaignRow) {
+  return normalizeDailyLimit(
+    campaign.daily_send_limit ?? campaign.daily_limit,
+    DEFAULT_TOTAL_DAILY_LIMIT,
+  );
+}
+
+function getCampaignNewContactLimit(campaign: CampaignRow) {
+  return normalizeDailyLimit(
+    campaign.new_contacts_per_day,
+    DEFAULT_NEW_CONTACTS_PER_DAY,
   );
 }
 

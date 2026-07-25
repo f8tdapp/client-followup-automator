@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test lib/schedule-policy.test.mjs",
+    "test:schedule": "node --experimental-strip-types --test lib/schedule-policy.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",

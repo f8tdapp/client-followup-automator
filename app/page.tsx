@@ -100,6 +100,11 @@ type DailySendPlanSummary = {
   dueEmail1: number;
   dueEmail2: number;
   dueEmail3: number;
+  totalDailyLimit: number;
+  rolledForwardTotalLimit: number;
+  rolledForwardNewContactLimit: number;
+  rolledForwardSafetyLimit: number;
+  stoppedByTerminalSuppression: number;
 };
 
 type DailySendPlanDiagnostics = {
@@ -129,6 +134,7 @@ type Campaign = {
   status: string;
   daily_limit: number;
   daily_send_limit: number | null;
+  new_contacts_per_day: number | null;
   broker_domain_daily_limit: number | null;
   cooldown_days: number;
   stop_on_reply: boolean | null;
@@ -273,7 +279,8 @@ type ClientForm = {
 type CampaignForm = {
   name: string;
   description: string;
-  daily_limit: string;
+  daily_send_limit: string;
+  new_contacts_per_day: string;
   cooldown_days: string;
 };
 
@@ -338,7 +345,8 @@ const emptyClientForm: ClientForm = {
 const emptyCampaignForm: CampaignForm = {
   name: "",
   description: "",
-  daily_limit: "10",
+  daily_send_limit: "25",
+  new_contacts_per_day: "8",
   cooldown_days: "30",
 };
 
@@ -365,6 +373,11 @@ const emptyDailySendPlan: DailySendPlan = {
     dueEmail1: 0,
     dueEmail2: 0,
     dueEmail3: 0,
+    totalDailyLimit: 25,
+    rolledForwardTotalLimit: 0,
+    rolledForwardNewContactLimit: 0,
+    rolledForwardSafetyLimit: 0,
+    stoppedByTerminalSuppression: 0,
   },
   diagnostics: {
     hasActiveCampaign: false,
@@ -2182,31 +2195,27 @@ export default function Dashboard() {
     setIsSavingCampaign(true);
 
     try {
-      const supabase = await getSupabase();
-      const campaignPayload = {
+      const response = await fetch("/api/campaigns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: editingCampaignId,
         name: campaignForm.name.trim(),
         description: campaignForm.description.trim() || null,
-        daily_limit: normalizeNumber(campaignForm.daily_limit, 10),
+          daily_send_limit: campaignForm.daily_send_limit,
+          new_contacts_per_day: campaignForm.new_contacts_per_day,
         cooldown_days: normalizeNumber(campaignForm.cooldown_days, 30),
-        updated_at: new Date().toISOString(),
+        }),
+      });
+      const result = (await response.json()) as {
+        campaign?: Campaign;
+        error?: string;
       };
-      const campaignRequest = editingCampaignId
-        ? supabase
-            .from("campaigns")
-            .update(campaignPayload)
-            .eq("id", editingCampaignId)
-            .select("*")
-            .single()
-        : supabase
-            .from("campaigns")
-            .insert(campaignPayload)
-            .select("*")
-            .single();
-      const { data, error: campaignError } = await campaignRequest;
 
-      if (campaignError) {
-        throw new Error(campaignError.message);
+      if (!response.ok || !result.campaign) {
+        throw new Error(result.error || "Unable to save message plan.");
       }
+      const data = result.campaign;
 
       setMessage(
         editingCampaignId ? "Message plan updated." : "Message plan created.",
@@ -2270,7 +2279,10 @@ export default function Dashboard() {
     setCampaignForm({
       name: campaign.name,
       description: campaign.description ?? "",
-      daily_limit: String(campaign.daily_limit),
+      daily_send_limit: String(
+        campaign.daily_send_limit ?? campaign.daily_limit ?? 25,
+      ),
+      new_contacts_per_day: String(campaign.new_contacts_per_day ?? 8),
       cooldown_days: String(campaign.cooldown_days),
     });
     openActionPanel("campaign");
@@ -3078,7 +3090,8 @@ export default function Dashboard() {
                 Today&apos;s items
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {todayWorkflowCount}
+                {dailySendPlan.summary.totalScheduled} of{" "}
+                {dailySendPlan.summary.totalDailyLimit}
               </p>
             </div>
             <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
@@ -3091,10 +3104,10 @@ export default function Dashboard() {
             </div>
             <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
-                Rolled forward
+                Safety roll-forward
               </p>
               <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {dailySendPlan.summary.skippedDueToDomainLimits}
+                {dailySendPlan.summary.rolledForwardSafetyLimit}
               </p>
             </div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -3123,15 +3136,36 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            PipelineCue limits sends by company/domain and rolls extras forward
-            automatically.
+          <div className="mt-4 grid gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 sm:grid-cols-2 xl:grid-cols-4">
+            <span>
+              Total limit reached:{" "}
+              <strong>{dailySendPlan.summary.rolledForwardTotalLimit}</strong>
+            </span>
+            <span>
+              New-contact limit reached:{" "}
+              <strong>{dailySendPlan.summary.rolledForwardNewContactLimit}</strong>
+            </span>
+            <span>
+              Safety or broker-domain limit:{" "}
+              <strong>{dailySendPlan.summary.rolledForwardSafetyLimit}</strong>
+            </span>
+            <span>
+              Stopped by suppression:{" "}
+              <strong>
+                {dailySendPlan.summary.stoppedByTerminalSuppression}
+              </strong>
+            </span>
           </div>
 
-          {dailySendPlan.summary.skippedDueToDomainLimits > 0 && (
+          {dailySendPlan.summary.rolledForwardTotalLimit +
+            dailySendPlan.summary.rolledForwardNewContactLimit +
+            dailySendPlan.summary.rolledForwardSafetyLimit >
+            0 && (
             <p className="mt-3 text-sm font-medium text-amber-800">
-              {dailySendPlan.summary.skippedDueToDomainLimits}
-              {" contacts rolled forward to protect today’s send limits."}
+              {dailySendPlan.summary.rolledForwardTotalLimit +
+                dailySendPlan.summary.rolledForwardNewContactLimit +
+                dailySendPlan.summary.rolledForwardSafetyLimit}
+              {" contacts rolled forward safely."}
             </p>
           )}
 
@@ -3722,11 +3756,19 @@ export default function Dashboard() {
                 <div className="mt-3 grid grid-cols-2 gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Daily limit
+                      Total daily limit
                     </p>
                     <p className="mt-1">
                       {activeCampaign.daily_send_limit ??
                         activeCampaign.daily_limit}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      New contacts
+                    </p>
+                    <p className="mt-1">
+                      {activeCampaign.new_contacts_per_day ?? 8}
                     </p>
                   </div>
                   <div>
@@ -4684,38 +4726,57 @@ export default function Dashboard() {
                       value={campaignForm.description}
                     />
                   </label>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
                     <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
-                      Daily limit
+                      Total daily email limit
                       <input
                         className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
                         min={1}
                         onChange={(event) =>
                           setCampaignForm((current) => ({
                             ...current,
-                            daily_limit: event.target.value,
+                            daily_send_limit: event.target.value,
                           }))
                         }
                         type="number"
-                        value={campaignForm.daily_limit}
+                        value={campaignForm.daily_send_limit}
                       />
                     </label>
                     <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
-                      Cooldown days
+                      New contacts per day
                       <input
                         className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
                         min={1}
                         onChange={(event) =>
                           setCampaignForm((current) => ({
                             ...current,
-                            cooldown_days: event.target.value,
+                            new_contacts_per_day: event.target.value,
                           }))
                         }
                         type="number"
-                        value={campaignForm.cooldown_days}
+                        value={campaignForm.new_contacts_per_day}
                       />
                     </label>
                   </div>
+                  <p className="text-xs leading-5 text-slate-500">
+                    Follow-ups receive priority. New contacts use the remaining
+                    daily capacity, up to the new-contact limit.
+                  </p>
+                  <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+                    Cooldown days
+                    <input
+                      className="h-10 rounded-md border border-slate-300 px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                      min={1}
+                      onChange={(event) =>
+                        setCampaignForm((current) => ({
+                          ...current,
+                          cooldown_days: event.target.value,
+                        }))
+                      }
+                      type="number"
+                      value={campaignForm.cooldown_days}
+                    />
+                  </label>
                   <button
                     className="h-10 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
                     disabled={isSavingCampaign}
@@ -4846,7 +4907,12 @@ export default function Dashboard() {
                           </span>
                         </div>
                         <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
-                          <span>{campaign.daily_limit}/day</span>
+                          <span>
+                            {campaign.daily_send_limit ?? campaign.daily_limit}/day total
+                          </span>
+                          <span>
+                            {campaign.new_contacts_per_day ?? 8}/day new
+                          </span>
                           <span>{campaign.cooldown_days} day cooldown</span>
                           <span>
                             {templatesForCampaign.length} email messages
@@ -4886,9 +4952,19 @@ export default function Dashboard() {
                               </div>
                               <div>
                                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                  Daily limit
+                                  Total daily email limit
                                 </p>
-                                <p className="mt-1">{campaign.daily_limit}</p>
+                                <p className="mt-1">
+                                  {campaign.daily_send_limit ?? campaign.daily_limit}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                  New contacts per day
+                                </p>
+                                <p className="mt-1">
+                                  {campaign.new_contacts_per_day ?? 8}
+                                </p>
                               </div>
                               <div>
                                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
