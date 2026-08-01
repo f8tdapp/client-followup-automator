@@ -17,16 +17,23 @@ export type SafetyCampaign = {
   stop_on_unsubscribe: boolean | null;
 };
 
-const suppressionTypes = new Set([
-  "replied",
-  "reply",
-  "bounced",
-  "bounce",
-  "unsubscribed",
-  "unsubscribe",
-  "do_not_contact",
-  "snoozed",
-]);
+export function normalizeSuppressionType(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * Shared production suppression rule. Every active non-snooze rule fails
+ * closed. A snooze remains active through its boundary date; a future snooze
+ * is deferred by scheduling and is currently ineligible for new enrolment.
+ */
+export function isSuppressionActiveOnDate(
+  rule: Pick<SafetyRule, "suppression_type" | "snoozed_until">,
+  date: string,
+) {
+  const type = normalizeSuppressionType(rule.suppression_type);
+  if (type !== "snoozed") return true;
+  return rule.snoozed_until == null || rule.snoozed_until >= date;
+}
 
 export function evaluateScheduleSafety(
   contact: SafetyContact | undefined,
@@ -43,7 +50,7 @@ export function evaluateScheduleSafety(
       safetyStatus: "missing_email",
     };
   }
-  if (contact.is_unsubscribed && campaign.stop_on_unsubscribe !== false) {
+  if (contact.is_unsubscribed) {
     return {
       safe: false,
       terminal: true,
@@ -52,28 +59,15 @@ export function evaluateScheduleSafety(
     };
   }
   for (const rule of suppressionRules) {
-    const type = rule.suppression_type.toLowerCase();
-    if (!suppressionTypes.has(type)) continue;
-    if (type === "snoozed" && rule.snoozed_until && rule.snoozed_until < date) {
-      continue;
-    }
-    if ((type === "replied" || type === "reply") && campaign.stop_on_reply === false) {
-      continue;
-    }
-    if ((type === "bounced" || type === "bounce") && campaign.stop_on_bounce === false) {
-      continue;
-    }
-    if (
-      (type === "unsubscribed" || type === "unsubscribe") &&
-      campaign.stop_on_unsubscribe === false
-    ) {
+    const type = normalizeSuppressionType(rule.suppression_type);
+    if (!isSuppressionActiveOnDate(rule, date)) {
       continue;
     }
     return {
       safe: false,
       terminal: type !== "snoozed",
-      reason: rule.reason || `Suppressed because contact is ${type}.`,
-      safetyStatus: type,
+      reason: rule.reason || `Suppressed because contact is ${type || "suppressed"}.`,
+      safetyStatus: type || "suppressed",
     };
   }
   if (

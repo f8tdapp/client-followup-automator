@@ -129,8 +129,7 @@ async function requestToken(body: URLSearchParams) {
   });
 
   if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`HubSpot token request failed: ${errorBody}`);
+    throw new Error(`HubSpot token request failed with status ${response.status}.`);
   }
 
   return (await response.json()) as HubSpotTokenResponse;

@@ -8,6 +8,7 @@ import {
   skipDraft,
   updateDraft,
 } from "@/lib/email-drafts";
+import { authorizeOwner } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -44,6 +45,8 @@ type EmailDraftBody =
     };
 
 export async function GET() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     assertEmailDraftRuntimeEnv();
 
@@ -54,6 +57,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   let routeBranch = "unparsed";
 
   console.info("[email-drafts] request", {

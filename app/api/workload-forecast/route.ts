@@ -1,11 +1,15 @@
 import { getWorkloadForecast } from "../../../lib/workload-forecast.ts";
+import { authorizeOwner } from "../../../lib/authorization.ts";
 
 export const dynamic = "force-dynamic";
 
 export function createWorkloadForecastGetHandler(
   loadForecast: typeof getWorkloadForecast = getWorkloadForecast,
+  authorize: typeof authorizeOwner = authorizeOwner,
 ) {
   return async function workloadForecastGet() {
+    const authorization = await authorize();
+    if (!authorization.ok) return authorization.response;
   try {
       return Response.json(await loadForecast());
   } catch (error) {

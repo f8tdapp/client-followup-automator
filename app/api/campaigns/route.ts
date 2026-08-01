@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authorizeOwner } from "@/lib/authorization";
 import {
   DEFAULT_NEW_CONTACTS_PER_DAY,
   DEFAULT_TOTAL_DAILY_LIMIT,
@@ -15,6 +16,8 @@ type CampaignInput = {
 };
 
 export async function POST(request: Request) {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   let input: CampaignInput;
 
   try {

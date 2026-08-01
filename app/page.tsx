@@ -3,6 +3,7 @@
 import {
   ChangeEvent,
   FormEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -13,6 +14,7 @@ import {
   getEmailComposeUrl,
   getFullEmailText,
 } from "@/lib/email-compose";
+import { createDashboardAuthBoundary } from "@/lib/dashboard-auth-boundary";
 import {
   beginForecastRequest,
   completeForecastRequest,
@@ -23,6 +25,7 @@ import {
   runForecastAlongside,
   runForecastRequest,
 } from "@/lib/workload-forecast-ui";
+import { shouldProceedWithEnrollment } from "@/lib/campaign-enrollment-ui";
 
 type Client = {
   id: string;
@@ -180,6 +183,7 @@ type Campaign = {
   daily_limit: number;
   daily_send_limit: number | null;
   new_contacts_per_day: number | null;
+  new_enrollments_paused: boolean | null;
   broker_domain_daily_limit: number | null;
   cooldown_days: number;
   stop_on_reply: boolean | null;
@@ -187,6 +191,29 @@ type Campaign = {
   stop_on_unsubscribe: boolean | null;
   created_at: string | null;
   updated_at: string | null;
+};
+
+type CampaignEnrollmentSummary = {
+  campaignId: string;
+  campaignName: string;
+  newEnrollmentsPaused: boolean;
+  eligibleNotEnrolled: number;
+  currentlyEnrolled: number;
+  waitingForEmail1: number;
+  waitingForEmail2: number;
+  waitingForEmail3: number;
+  waitingForEmail4Plus: number;
+  hasLaterActiveSteps: boolean;
+};
+
+type EnrollmentOverview = {
+  totalHubSpotContacts: number;
+  campaigns: CampaignEnrollmentSummary[];
+};
+
+const emptyEnrollmentOverview: EnrollmentOverview = {
+  totalHubSpotContacts: 0,
+  campaigns: [],
 };
 
 type CampaignStep = {
@@ -495,11 +522,25 @@ const campaignStatuses = [
   { label: "Done", value: "completed" },
 ] as const;
 
-async function getSupabase() {
-  const { supabase } = await import("@/lib/supabase");
-
-  return supabase;
+async function readDashboardResponse<T>(responseInput: Response | Promise<Response>): Promise<T> {
+  const response = await responseInput;
+  const body = (await response.json()) as T & { error?: string };
+  if (!response.ok) throw new Error(body.error || "Dashboard request failed.");
+  return body;
 }
+
+async function mutateDashboard<T>(
+  body: Record<string, unknown>,
+  request: typeof fetch = fetch,
+): Promise<T> {
+  return readDashboardResponse<T>(await request("/api/dashboard-data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+}
+
+class DashboardAuthorizationError extends Error {}
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -1048,6 +1089,9 @@ export default function Dashboard() {
   const [sendingSettingsForm, setSendingSettingsForm] =
     useState<SendingSettingsForm>(emptySendingSettingsForm);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [enrollmentOverview, setEnrollmentOverview] = useState<EnrollmentOverview>(
+    emptyEnrollmentOverview,
+  );
   const [campaignSteps, setCampaignSteps] = useState<CampaignStep[]>([]);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([]);
   const [clientEvents, setClientEvents] = useState<ClientEvent[]>([]);
@@ -1076,6 +1120,8 @@ export default function Dashboard() {
   const [isCreatingStarterCampaign, setIsCreatingStarterCampaign] =
     useState(false);
   const [isEnrollingContacts, setIsEnrollingContacts] = useState(false);
+  const [updatingEnrollmentPauseCampaignId, setUpdatingEnrollmentPauseCampaignId] =
+    useState<string | null>(null);
   const [isResettingStarterCopy, setIsResettingStarterCopy] = useState(false);
   const [editingCampaignStepId, setEditingCampaignStepId] = useState<
     string | null
@@ -1138,6 +1184,48 @@ export default function Dashboard() {
   const campaignNameInputRef = useRef<HTMLInputElement>(null);
   const templateCampaignSelectRef = useRef<HTMLSelectElement>(null);
   const templateNameInputRef = useRef<HTMLInputElement>(null);
+  const [authBoundary] = useState(() =>
+    createDashboardAuthBoundary(
+      clearPrivateDashboardState,
+      (path) => window.location.assign(path),
+    ),
+  );
+
+  function clearPrivateDashboardState() {
+    setClients([]);
+    setClientEvents([]);
+    setCampaigns([]);
+    setCampaignSteps([]);
+    setEmailTemplates([]);
+    setDailySendPlan(emptyDailySendPlan);
+    setDailyDrafts([]);
+    setEmailDraftSummary(emptyEmailDraftSummary);
+    setSendingSettings(null);
+    setSendingSettingsForm(emptySendingSettingsForm);
+    setDailyRecommendations([]);
+    setHubSpotStatus({ status: "not_connected", lastSyncAt: null, contactsSynced: 0 });
+    setHubSpotHealth({ totalSyncedContacts: 0, safeToContact: 0, unsubscribedExcluded: 0, recentlyContactedExcluded: 0 });
+    setEnrollmentOverview(emptyEnrollmentOverview);
+    setForecastUiState(createForecastUiState<WorkloadForecast>());
+    setSelectedTimelineClientId("");
+    setEditingCampaignId(null);
+    setExpandedCampaignId(null);
+    setEditingCampaignStepId(null);
+    setExpandedCampaignStepId(null);
+    setEditingDraftId(null);
+    setUpdatingDraftId(null);
+    setMessage("");
+    setError("");
+  }
+
+  const authenticatedFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const generation = authBoundary.capture();
+    const response = await fetch(input, init);
+    if (authBoundary.handleStatus(response.status) || !authBoundary.canCommit(generation)) {
+      throw new DashboardAuthorizationError("Dashboard authorization changed.");
+    }
+    return response;
+  }, [authBoundary]);
 
   const timelineClient = useMemo(() => {
     if (!selectedTimelineClientId) {
@@ -1319,10 +1407,9 @@ export default function Dashboard() {
         : !hasEnrolledContacts
           ? {
               title: "Enroll eligible contacts",
-              reason: "Add safe contacts to the follow-up campaign.",
-              actionLabel: "Enroll contacts",
-              action: () =>
-                void handleCampaignScheduleAction("enroll_eligible_contacts"),
+              reason: "Choose a campaign and confirm its exact eligible count.",
+              actionLabel: "Choose campaign",
+              action: () => scrollToElement(sendPlanRef),
               progressStep: "plan",
             }
             : scheduledDraftContactCount === 0 && emailDraftSummary.totalDrafts === 0
@@ -1474,18 +1561,10 @@ export default function Dashboard() {
     setError("");
 
     try {
-      const supabase = await getSupabase();
-      const { data, error: fetchError } = await supabase
-        .from("clients")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (fetchError) {
-        setError(fetchError.message);
-        setClients([]);
-      } else {
-        setClients(data ?? []);
-      }
+      const { clients: data } = await readDashboardResponse<{ clients: Client[] }>(
+        await authenticatedFetch("/api/dashboard-data?resource=clients"),
+      );
+      setClients(data ?? []);
     } catch (fetchError) {
       setError(
         fetchError instanceof Error
@@ -1503,7 +1582,7 @@ export default function Dashboard() {
     await runForecastAlongside({
       forecast: async () =>
         readForecastResponse<WorkloadForecast>(
-          await fetch("/api/workload-forecast"),
+          await authenticatedFetch("/api/workload-forecast"),
         ),
       other: async () => {
         const [
@@ -1512,12 +1591,14 @@ export default function Dashboard() {
           scheduleResponse,
           draftsResponse,
           sendingSettingsResponse,
+          enrollmentSummaryResponse,
         ] = await Promise.all([
-          fetch("/api/hubspot/status"),
-          fetch("/api/hubspot/recommendations"),
-          fetch("/api/campaign-schedule"),
-          fetch("/api/email-drafts"),
-          fetch("/api/sending-settings"),
+          authenticatedFetch("/api/hubspot/status"),
+          authenticatedFetch("/api/hubspot/recommendations"),
+          authenticatedFetch("/api/campaign-schedule"),
+          authenticatedFetch("/api/email-drafts"),
+          authenticatedFetch("/api/sending-settings"),
+          authenticatedFetch("/api/campaign-enrollments"),
         ]);
 
         if (statusResponse.ok) {
@@ -1552,6 +1633,13 @@ export default function Dashboard() {
             setSendingSettingsForm(getSendingSettingsForm(body.settings));
           }
         }
+
+        if (enrollmentSummaryResponse.ok) {
+          const body = (await enrollmentSummaryResponse.json()) as {
+            overview: EnrollmentOverview;
+          };
+          setEnrollmentOverview(body.overview);
+        }
       },
       onForecastSuccess: (forecast) =>
         setForecastUiState(completeForecastRequest(forecast)),
@@ -1575,11 +1663,26 @@ export default function Dashboard() {
     return token;
   }
 
-  function requestWorkloadForecast(requestToken: number) {
+  async function loadEnrollmentSummary() {
+    const response = await authenticatedFetch("/api/campaign-enrollments");
+    const body = (await response.json()) as {
+      overview?: EnrollmentOverview;
+      error?: string;
+    };
+
+    if (!response.ok || !body.overview) {
+      throw new Error(body.error || "Unable to load enrolment summary.");
+    }
+
+    setEnrollmentOverview(body.overview);
+    return body.overview;
+  }
+
+  const requestWorkloadForecast = useCallback((requestToken: number) => {
     return runForecastRequest({
       request: async () =>
         readForecastResponse<WorkloadForecast>(
-          await fetch("/api/workload-forecast"),
+          await authenticatedFetch("/api/workload-forecast"),
         ),
       onSuccess: (forecast) =>
         setForecastUiState(completeForecastRequest(forecast)),
@@ -1591,7 +1694,7 @@ export default function Dashboard() {
       isCurrent: () =>
         forecastRequestGuardRef.current.isCurrent(requestToken),
     });
-  }
+  }, [authenticatedFetch]);
 
   async function retryWorkloadForecast() {
     const requestToken = startForecastRequest();
@@ -1613,7 +1716,7 @@ export default function Dashboard() {
     setIsSyncingHubSpot(true);
 
     try {
-      const response = await fetch("/api/hubspot/sync", {
+      const response = await authenticatedFetch("/api/hubspot/sync", {
         method: "POST",
       });
       const body = (await response.json()) as {
@@ -1641,6 +1744,13 @@ export default function Dashboard() {
         setDailyRecommendations(body.recommendations);
       }
 
+      await loadEnrollmentSummary().catch((summaryError) => {
+        reportError(
+          "Unable to refresh enrolment summary after HubSpot sync",
+          summaryError,
+        );
+      });
+
       setMessage(
         `HubSpot sync preview complete. Synced ${
           body.contactsSynced ?? 0
@@ -1660,7 +1770,7 @@ export default function Dashboard() {
     setIsGeneratingSchedule(true);
 
     try {
-      const response = await fetch("/api/campaign-schedule", {
+      const response = await authenticatedFetch("/api/campaign-schedule", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1695,7 +1805,7 @@ export default function Dashboard() {
   }
 
   async function loadTodayDrafts() {
-    const response = await fetch("/api/email-drafts", {
+    const response = await authenticatedFetch("/api/email-drafts", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1719,7 +1829,7 @@ export default function Dashboard() {
     setIsSavingSendingSettings(true);
 
     try {
-      const response = await fetch("/api/sending-settings", {
+      const response = await authenticatedFetch("/api/sending-settings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1760,7 +1870,7 @@ export default function Dashboard() {
     setIsSendingTestEmail(true);
 
     try {
-      const response = await fetch("/api/sending-settings", {
+      const response = await authenticatedFetch("/api/sending-settings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1787,6 +1897,7 @@ export default function Dashboard() {
 
   async function handleCampaignScheduleAction(
     action: "create_starter_campaign" | "enroll_eligible_contacts",
+    enrollmentCampaign?: CampaignEnrollmentSummary,
   ) {
     setError("");
     setMessage("");
@@ -1794,16 +1905,44 @@ export default function Dashboard() {
     if (action === "create_starter_campaign") {
       setIsCreatingStarterCampaign(true);
     } else {
+      if (!enrollmentCampaign) {
+        setError("Choose a campaign before enrolling contacts.");
+        return;
+      }
+      if (enrollmentCampaign.newEnrollmentsPaused) {
+        setError(
+          "New enrolments are paused. Resume new enrolments before adding contacts.",
+        );
+        return;
+      }
+      const eligibleCount = enrollmentCampaign.eligibleNotEnrolled;
+      if (
+        !shouldProceedWithEnrollment(eligibleCount, (confirmation) =>
+          window.confirm(confirmation),
+        )
+      ) {
+        return;
+      }
       setIsEnrollingContacts(true);
     }
 
     try {
-      const response = await fetch("/api/campaign-schedule", {
+      const response = await authenticatedFetch("/api/campaign-schedule", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({
+          action,
+          campaignId:
+            action === "enroll_eligible_contacts"
+              ? enrollmentCampaign?.campaignId
+              : undefined,
+          confirmedEligibleCount:
+            action === "enroll_eligible_contacts"
+              ? enrollmentCampaign?.eligibleNotEnrolled
+              : undefined,
+        }),
       });
       const body = (await response.json()) as DailySendPlan & {
         error?: string;
@@ -1818,9 +1957,10 @@ export default function Dashboard() {
         action === "create_starter_campaign"
           ? body.message ||
               "Starter campaign is active with Email 1, Email 2, and Email 3."
-          : `${body.diagnostics.enrolledContactCount} contacts are enrolled in active campaigns.`,
+          : body.message || "Eligible contacts enrolled.",
       );
       await loadCampaignsAndTemplates();
+      await loadEnrollmentSummary();
     } catch (scheduleError) {
       setError(
         getErrorMessage(scheduleError, "Unable to update campaign schedule setup."),
@@ -1834,13 +1974,62 @@ export default function Dashboard() {
     }
   }
 
+  async function handleEnrollmentPauseToggle(
+    enrollmentCampaign: CampaignEnrollmentSummary,
+  ) {
+    const nextPaused = !enrollmentCampaign.newEnrollmentsPaused;
+    const confirmed = window.confirm(
+      nextPaused
+        ? "Pause new enrolments? Existing enrolled contacts and follow-ups will continue."
+        : "Resume new enrolments? Contacts will still only be enrolled after you confirm the exact eligible count.",
+    );
+    if (!confirmed) return;
+
+    setError("");
+    setMessage("");
+    setUpdatingEnrollmentPauseCampaignId(enrollmentCampaign.campaignId);
+    try {
+      const response = await authenticatedFetch("/api/campaign-enrollments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          campaignId: enrollmentCampaign.campaignId,
+          newEnrollmentsPaused: nextPaused,
+        }),
+      });
+      const body = (await response.json()) as {
+        overview?: EnrollmentOverview;
+        message?: string;
+        error?: string;
+      };
+      if (!response.ok || !body.overview) {
+        throw new Error(body.error || "Unable to update enrolment pause state.");
+      }
+      setEnrollmentOverview(body.overview);
+      setCampaigns((current) =>
+        current.map((campaign) =>
+          campaign.id === enrollmentCampaign.campaignId
+            ? { ...campaign, new_enrollments_paused: nextPaused }
+            : campaign,
+        ),
+      );
+      setMessage(body.message ?? "Enrolment pause state updated.");
+    } catch (pauseError) {
+      setError(
+        getErrorMessage(pauseError, "Unable to update enrolment pause state."),
+      );
+    } finally {
+      setUpdatingEnrollmentPauseCampaignId(null);
+    }
+  }
+
   async function handleResetStarterCampaignCopy() {
     setError("");
     setMessage("");
     setIsResettingStarterCopy(true);
 
     try {
-      const response = await fetch("/api/campaign-schedule", {
+      const response = await authenticatedFetch("/api/campaign-schedule", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1869,35 +2058,15 @@ export default function Dashboard() {
 
   async function loadCampaignsAndTemplates() {
     try {
-      const supabase = await getSupabase();
-      const [
-        { data: campaignData, error: campaignError },
-        { data: templateData, error: templateError },
-        { data: stepData, error: stepError },
-      ] = await Promise.all([
-        supabase.from("campaigns").select("*").order("created_at", {
-          ascending: false,
-        }),
-        supabase.from("email_templates").select("*").order("created_at", {
-          ascending: false,
-        }),
-        supabase
-          .from("campaign_steps")
-          .select("*")
-          .order("step_number", { ascending: true }),
-      ]);
-
-      if (campaignError) {
-        throw new Error(campaignError.message);
-      }
-
-      if (templateError) {
-        throw new Error(templateError.message);
-      }
-
-      if (stepError) {
-        throw new Error(stepError.message);
-      }
+      const {
+        campaigns: campaignData,
+        emailTemplates: templateData,
+        campaignSteps: stepData,
+      } = await readDashboardResponse<{
+        campaigns: Campaign[];
+        emailTemplates: EmailTemplate[];
+        campaignSteps: CampaignStep[];
+      }>(await authenticatedFetch("/api/dashboard-data?resource=campaign-config"));
 
       setCampaigns(campaignData ?? []);
       setCampaignSteps(stepData ?? []);
@@ -1925,19 +2094,10 @@ export default function Dashboard() {
     }
 
     try {
-      const supabase = await getSupabase();
-      const { data, error: timelineError } = await supabase
-        .from("client_events")
-        .select("*")
-        .eq("client_id", clientId)
-        .order("created_at", { ascending: false })
-        .limit(20);
-
-      if (timelineError) {
-        throw new Error(timelineError.message);
-      }
-
-      setClientEvents(data ?? []);
+      const { events } = await readDashboardResponse<{ events: ClientEvent[] }>(
+        await authenticatedFetch(`/api/dashboard-data?resource=timeline&clientId=${encodeURIComponent(clientId)}`),
+      );
+      setClientEvents(events ?? []);
     } catch (timelineError) {
       setClientEvents([]);
       setError(
@@ -1964,12 +2124,14 @@ export default function Dashboard() {
             scheduleResponse,
             draftsResponse,
             sendingSettingsResponse,
+            enrollmentSummaryResponse,
           ] = await Promise.all([
-            fetch("/api/hubspot/status"),
-            fetch("/api/hubspot/recommendations"),
-            fetch("/api/campaign-schedule"),
-            fetch("/api/email-drafts"),
-            fetch("/api/sending-settings"),
+            authenticatedFetch("/api/hubspot/status"),
+            authenticatedFetch("/api/hubspot/recommendations"),
+            authenticatedFetch("/api/campaign-schedule"),
+            authenticatedFetch("/api/email-drafts"),
+            authenticatedFetch("/api/sending-settings"),
+            authenticatedFetch("/api/campaign-enrollments"),
           ]);
 
           if (!isActive) {
@@ -2020,6 +2182,14 @@ export default function Dashboard() {
               );
             }
           }
+
+          if (enrollmentSummaryResponse.ok) {
+            const enrollmentBody =
+              (await enrollmentSummaryResponse.json()) as {
+                overview: EnrollmentOverview;
+              };
+            setEnrollmentOverview(enrollmentBody.overview);
+          }
         } catch (hubSpotError) {
           reportError("Unable to load HubSpot dashboard data", hubSpotError);
         }
@@ -2027,59 +2197,27 @@ export default function Dashboard() {
       })();
     }, 0);
 
-    getSupabase()
-      .then((supabase) =>
-        Promise.all([
-          supabase.from("clients").select("*").order("created_at", {
-            ascending: false,
-          }),
-          supabase.from("campaigns").select("*").order("created_at", {
-            ascending: false,
-          }),
-          supabase.from("email_templates").select("*").order("created_at", {
-            ascending: false,
-          }),
-          supabase
-            .from("campaign_steps")
-            .select("*")
-            .order("step_number", { ascending: true }),
-        ]),
-      )
-      .then(([clientsResult, campaignsResult, templatesResult, stepsResult]) => {
+    Promise.all([
+      readDashboardResponse<{ clients: Client[] }>(authenticatedFetch("/api/dashboard-data?resource=clients")),
+      readDashboardResponse<{
+        campaigns: Campaign[];
+        emailTemplates: EmailTemplate[];
+        campaignSteps: CampaignStep[];
+      }>(authenticatedFetch("/api/dashboard-data?resource=campaign-config")),
+    ])
+      .then(([clientsResult, campaignConfig]) => {
         if (!isActive) {
           return;
         }
 
-        if (clientsResult.error) {
-          throw new Error(clientsResult.error.message);
-        }
-
-        setClients(clientsResult.data ?? []);
-
-        if (campaignsResult.error) {
-          setError(campaignsResult.error.message);
-        } else {
-          setCampaigns(campaignsResult.data ?? []);
-          setTemplateForm((current) => {
-            if (current.campaign_id || !campaignsResult.data?.[0]) {
-              return current;
-            }
-
-            return { ...current, campaign_id: campaignsResult.data[0].id };
-          });
-        }
-
-        if (templatesResult.error) {
-          setError(templatesResult.error.message);
-        } else {
-          setEmailTemplates(templatesResult.data ?? []);
-        }
-
-        if (stepsResult.error) {
-          setError(stepsResult.error.message);
-        } else {
-          setCampaignSteps(stepsResult.data ?? []);
-        }
+        setClients(clientsResult.clients ?? []);
+        setCampaigns(campaignConfig.campaigns ?? []);
+        setEmailTemplates(campaignConfig.emailTemplates ?? []);
+        setCampaignSteps(campaignConfig.campaignSteps ?? []);
+        setTemplateForm((current) => {
+          if (current.campaign_id || !campaignConfig.campaigns?.[0]) return current;
+          return { ...current, campaign_id: campaignConfig.campaigns[0].id };
+        });
 
         setIsLoading(false);
       })
@@ -2104,7 +2242,7 @@ export default function Dashboard() {
       isActive = false;
       forecastRequestGuard.unmount();
     };
-  }, []);
+  }, [authenticatedFetch, requestWorkloadForecast]);
 
   useEffect(() => {
     function handleScroll() {
@@ -2126,26 +2264,15 @@ export default function Dashboard() {
       };
     }
 
-    getSupabase()
-      .then((supabase) =>
-        supabase
-          .from("client_events")
-          .select("*")
-          .eq("client_id", timelineClient.id)
-          .order("created_at", { ascending: false })
-          .limit(20),
-      )
-      .then(({ data, error: timelineError }) => {
+    readDashboardResponse<{ events: ClientEvent[] }>(
+      authenticatedFetch(`/api/dashboard-data?resource=timeline&clientId=${encodeURIComponent(timelineClient.id)}`),
+    )
+      .then(({ events }) => {
         if (!isActive) {
           return;
         }
 
-        if (timelineError) {
-          setError(timelineError.message);
-          setClientEvents([]);
-        } else {
-          setClientEvents(data ?? []);
-        }
+        setClientEvents(events ?? []);
       })
       .catch((timelineError) => {
         if (!isActive) {
@@ -2163,7 +2290,7 @@ export default function Dashboard() {
     return () => {
       isActive = false;
     };
-  }, [timelineClient?.id]);
+  }, [authenticatedFetch, timelineClient?.id]);
 
   async function handleClientSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2180,37 +2307,19 @@ export default function Dashboard() {
     setIsSavingClient(true);
 
     try {
-      const supabase = await getSupabase();
-      const { data, error: insertError } = await supabase
-        .from("clients")
-        .insert({
+      const data = await mutateDashboard<{ id: string }>({
+        action: "create_client",
+        client: {
           first_name: clientForm.first_name.trim() || null,
           last_name: clientForm.last_name.trim() || null,
           company: clientForm.company.trim() || null,
           email: trimmedEmail,
           phone: clientForm.phone.trim() || null,
           notes: clientForm.notes.trim() || null,
-        })
-        .select("id")
-        .single();
-
-      if (insertError) {
-        throw new Error(insertError.message);
-      }
+        },
+      }, authenticatedFetch);
 
       if (data?.id) {
-        const { error: eventError } = await supabase
-          .from("client_events")
-          .insert({
-            client_id: data.id,
-            event_type: "manual_add",
-            details: "Contact manually added as a backup option.",
-          });
-
-        if (eventError) {
-          throw new Error(eventError.message);
-        }
-
         setSelectedTimelineClientId(data.id);
       }
 
@@ -2252,13 +2361,9 @@ export default function Dashboard() {
         throw new Error("CSV must include a header row and at least one row.");
       }
 
-      const supabase = await getSupabase();
-      const { data: existingClients, error: existingClientsError } =
-        await supabase.from("clients").select("email");
-
-      if (existingClientsError) {
-        throw new Error(existingClientsError.message);
-      }
+      const { clients: existingClients } = await readDashboardResponse<{ clients: Client[] }>(
+        await authenticatedFetch("/api/dashboard-data?resource=clients"),
+      );
 
       const existingEmails = new Set(
         (existingClients ?? [])
@@ -2271,30 +2376,11 @@ export default function Dashboard() {
       );
 
       if (inserts.length > 0) {
-        const { data: insertedClients, error: insertError } = await supabase
-          .from("clients")
-          .insert(inserts)
-          .select("id,email");
-
-        if (insertError) {
-          throw new Error(insertError.message);
-        }
-
-        const eventRows = (insertedClients ?? []).map((client) => ({
-          client_id: client.id,
-          event_type: "csv_import",
-          details: `Imported from ${file.name}.`,
-        }));
-
-        if (eventRows.length > 0) {
-          const { error: eventError } = await supabase
-            .from("client_events")
-            .insert(eventRows);
-
-          if (eventError) {
-            throw new Error(eventError.message);
-          }
-        }
+        await mutateDashboard({
+          action: "import_clients",
+          clients: inserts,
+          eventDetails: `Imported from ${file.name}.`,
+        }, authenticatedFetch);
       }
 
       setImportSummary(summary);
@@ -2323,7 +2409,7 @@ export default function Dashboard() {
     setIsSavingCampaign(true);
 
     try {
-      const response = await fetch("/api/campaigns", {
+      const response = await authenticatedFetch("/api/campaigns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2371,18 +2457,7 @@ export default function Dashboard() {
     setError("");
 
     try {
-      const supabase = await getSupabase();
-      const { error: statusError } = await supabase
-        .from("campaigns")
-        .update({
-          status,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", campaign.id);
-
-      if (statusError) {
-        throw new Error(statusError.message);
-      }
+      await mutateDashboard({ action: "set_campaign_status", campaignId: campaign.id, status }, authenticatedFetch);
 
       setMessage(`Message plan marked ${status}.`);
       await loadCampaignsAndTemplates();
@@ -2436,15 +2511,7 @@ export default function Dashboard() {
     setError("");
 
     try {
-      const supabase = await getSupabase();
-      const { error: deleteError } = await supabase
-        .from("campaigns")
-        .delete()
-        .eq("id", campaign.id);
-
-      if (deleteError) {
-        throw new Error(deleteError.message);
-      }
+      await mutateDashboard({ action: "delete_campaign", campaignId: campaign.id }, authenticatedFetch);
 
       if (editingCampaignId === campaign.id) {
         setEditingCampaignId(null);
@@ -2479,19 +2546,15 @@ export default function Dashboard() {
         );
       }
 
-      const supabase = await getSupabase();
-      const { error: templateError } = await supabase
-        .from("email_templates")
-        .insert({
+      await mutateDashboard({
+        action: "create_template",
+        template: {
           campaign_id: templateForm.campaign_id,
           name: templateForm.name.trim(),
           subject: templateForm.subject.trim(),
           body: templateForm.body.trim(),
-        });
-
-      if (templateError) {
-        throw new Error(templateError.message);
-      }
+        },
+      }, authenticatedFetch);
 
       setMessage("Email message created.");
       setTemplateForm((current) => ({
@@ -2525,19 +2588,12 @@ export default function Dashboard() {
     setIsSavingCampaignStep(true);
 
     try {
-      const supabase = await getSupabase();
-      const { error: stepError } = await supabase
-        .from("campaign_steps")
-        .update({
-          subject_template: campaignStepForm.subject_template.trim(),
-          body_template: campaignStepForm.body_template.trim(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", step.id);
-
-      if (stepError) {
-        throw new Error(stepError.message);
-      }
+      await mutateDashboard({
+        action: "update_campaign_step",
+        stepId: step.id,
+        subject: campaignStepForm.subject_template,
+        body: campaignStepForm.body_template,
+      }, authenticatedFetch);
 
       setMessage(`Email ${step.step_number} saved. Nothing was sent.`);
       setEditingCampaignStepId(null);
@@ -2582,7 +2638,7 @@ export default function Dashboard() {
     setIsGeneratingDrafts(true);
 
     try {
-      const response = await fetch("/api/email-drafts", {
+      const response = await authenticatedFetch("/api/email-drafts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2623,7 +2679,7 @@ export default function Dashboard() {
     setUpdatingDraftId(draftId);
 
     try {
-      const response = await fetch("/api/email-drafts", {
+      const response = await authenticatedFetch("/api/email-drafts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2660,7 +2716,7 @@ export default function Dashboard() {
     setUpdatingDraftId(draftId);
 
     try {
-      const response = await fetch("/api/email-drafts", {
+      const response = await authenticatedFetch("/api/email-drafts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2719,7 +2775,7 @@ export default function Dashboard() {
     setUpdatingDraftId(draftId);
 
     try {
-      const response = await fetch("/api/email-drafts", {
+      const response = await authenticatedFetch("/api/email-drafts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -3019,6 +3075,9 @@ export default function Dashboard() {
               HubSpot-first daily follow-up assistant
             </p>
           </div>
+          <form action="/api/auth/logout" method="post">
+            <button className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Sign out</button>
+          </form>
         </header>
 
         {(message || error) && (
@@ -3222,22 +3281,6 @@ export default function Dashboard() {
                     : "Create Starter Campaign"}
                 </button>
               )}
-              {hasEnrolledContacts ? (
-                <div className="flex h-10 shrink-0 items-center whitespace-nowrap rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-bold text-blue-800">
-                  {dailySendPlan.diagnostics.enrolledContactCount} contacts enrolled
-                </div>
-              ) : (
-                <button
-                  className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm transition hover:border-cyan-600 hover:text-cyan-700 disabled:cursor-not-allowed disabled:text-slate-400"
-                  disabled={isEnrollingContacts}
-                  onClick={() =>
-                    void handleCampaignScheduleAction("enroll_eligible_contacts")
-                  }
-                  type="button"
-                >
-                  {isEnrollingContacts ? "Enrolling..." : "Enroll Eligible Contacts"}
-                </button>
-              )}
               <button
                 className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={isGeneratingSchedule}
@@ -3247,6 +3290,134 @@ export default function Dashboard() {
                 {isGeneratingSchedule ? "Generating..." : "Generate Today"}
               </button>
             </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div>
+              <p className="text-sm font-semibold text-slate-950">
+                Campaign enrolment visibility
+              </p>
+              <p className="mt-1 text-xs leading-5 text-slate-600">
+                HubSpot Sync refreshes contact data but never enrols contacts.
+                Enrolling is a separate, confirmed action.
+              </p>
+            </div>
+            <div className="mt-4 w-fit rounded-xl border border-cyan-100 bg-cyan-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                Total HubSpot contacts
+              </p>
+              <p className="mt-2 text-2xl font-semibold text-slate-950">
+                {enrollmentOverview.totalHubSpotContacts}
+              </p>
+            </div>
+            <div className="mt-4 space-y-3">
+              {enrollmentOverview.campaigns.map((enrollmentCampaign) => {
+                const isUpdatingPause =
+                  updatingEnrollmentPauseCampaignId ===
+                  enrollmentCampaign.campaignId;
+                return (
+                  <div
+                    className="rounded-xl border border-white bg-white p-4 shadow-sm"
+                    key={enrollmentCampaign.campaignId}
+                  >
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <p className="font-semibold text-slate-950">
+                          {enrollmentCampaign.campaignName}
+                        </p>
+                        <span
+                          className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${
+                            enrollmentCampaign.newEnrollmentsPaused
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-emerald-100 text-emerald-800"
+                          }`}
+                        >
+                          {enrollmentCampaign.newEnrollmentsPaused
+                            ? "New enrolments paused"
+                            : "New enrolments open"}
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <button
+                          className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm disabled:cursor-not-allowed disabled:text-slate-400"
+                          disabled={isUpdatingPause || isEnrollingContacts}
+                          onClick={() =>
+                            void handleEnrollmentPauseToggle(enrollmentCampaign)
+                          }
+                          type="button"
+                        >
+                          {isUpdatingPause
+                            ? "Updating..."
+                            : enrollmentCampaign.newEnrollmentsPaused
+                              ? "Resume new enrolments"
+                              : "Pause new enrolments"}
+                        </button>
+                        <button
+                          className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-800 shadow-sm disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                          disabled={
+                            isEnrollingContacts ||
+                            enrollmentCampaign.newEnrollmentsPaused ||
+                            enrollmentCampaign.eligibleNotEnrolled === 0
+                          }
+                          onClick={() =>
+                            void handleCampaignScheduleAction(
+                              "enroll_eligible_contacts",
+                              enrollmentCampaign,
+                            )
+                          }
+                          type="button"
+                        >
+                          {isEnrollingContacts
+                            ? "Enrolling..."
+                            : enrollmentCampaign.newEnrollmentsPaused
+                              ? "New enrolments paused"
+                              : "Enroll Eligible Contacts"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+                      {[
+                        [
+                          "Eligible, not enrolled",
+                          enrollmentCampaign.eligibleNotEnrolled,
+                        ],
+                        ["Currently enrolled", enrollmentCampaign.currentlyEnrolled],
+                        ["Waiting for Email 1", enrollmentCampaign.waitingForEmail1],
+                        ["Waiting for Email 2", enrollmentCampaign.waitingForEmail2],
+                        ["Waiting for Email 3", enrollmentCampaign.waitingForEmail3],
+                        ...(enrollmentCampaign.hasLaterActiveSteps
+                          ? [
+                              [
+                                "Waiting for Email 4+",
+                                enrollmentCampaign.waitingForEmail4Plus,
+                              ],
+                            ]
+                          : []),
+                      ].map(([label, value]) => (
+                        <div className="rounded-lg bg-slate-50 p-3" key={label}>
+                          <p className="text-xs leading-4 text-slate-500">
+                            {label}
+                          </p>
+                          <p className="mt-2 text-xl font-semibold text-slate-950">
+                            {value}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {enrollmentOverview.campaigns.length === 0 && (
+                <p className="rounded-xl bg-white p-4 text-sm text-slate-600">
+                  No active campaigns are available.
+                </p>
+              )}
+            </div>
+            <p className="mt-3 text-xs leading-5 text-slate-600">
+              Pausing affects only future enrolments. Existing enrolled contacts
+              continue through Email 1, Email 2, Email 3, and any later active
+              follow-ups. Nothing is sent automatically.
+            </p>
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">

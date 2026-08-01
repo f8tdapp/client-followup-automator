@@ -5,6 +5,11 @@ import {
   refreshHubSpotTokens,
 } from "@/lib/hubspot";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import {
+  decryptHubSpotToken,
+  encryptHubSpotToken,
+  isEncryptedHubSpotTokenEnvelope,
+} from "@/lib/hubspot-token-crypto";
 
 type HubSpotConnection = {
   id: string;
@@ -67,7 +72,8 @@ export async function getHubSpotConnectionStatus() {
   }
 
   const needsReconnect =
-    !connection.refresh_token ||
+    !isEncryptedHubSpotTokenEnvelope(connection.refresh_token) ||
+    !isEncryptedHubSpotTokenEnvelope(connection.access_token) ||
     (connection.status !== "connected" && connection.status !== "needs_reconnect");
 
   return {
@@ -100,9 +106,11 @@ async function getPrivateTokenConnectionStatus() {
 
 export async function getValidAccessToken(connection: HubSpotConnection) {
   const supabaseAdmin = getSupabaseAdmin();
-  if (!connection.access_token) {
+  if (!connection.access_token || !isEncryptedHubSpotTokenEnvelope(connection.access_token)) {
     throw new Error("HubSpot is not connected.");
   }
+
+  const accessToken = decryptHubSpotToken(connection.access_token);
 
   const expiresAt = connection.token_expires_at
     ? new Date(connection.token_expires_at).getTime()
@@ -110,15 +118,16 @@ export async function getValidAccessToken(connection: HubSpotConnection) {
   const shouldRefresh = expiresAt - Date.now() < 60_000;
 
   if (!shouldRefresh) {
-    return connection.access_token;
+    return accessToken;
   }
 
-  if (!connection.refresh_token) {
+  if (!connection.refresh_token || !isEncryptedHubSpotTokenEnvelope(connection.refresh_token)) {
     await markConnectionNeedsReconnect("Missing refresh token.");
     throw new Error("HubSpot needs to be reconnected.");
   }
 
-  const refreshedTokens = await refreshHubSpotTokens(connection.refresh_token);
+  const refreshToken = decryptHubSpotToken(connection.refresh_token);
+  const refreshedTokens = await refreshHubSpotTokens(refreshToken);
   const tokenExpiresAt = new Date(
     Date.now() + refreshedTokens.expires_in * 1000,
   ).toISOString();
@@ -126,8 +135,8 @@ export async function getValidAccessToken(connection: HubSpotConnection) {
   const { error } = await supabaseAdmin
     .from("hubspot_connections")
     .update({
-      access_token: refreshedTokens.access_token,
-      refresh_token: refreshedTokens.refresh_token ?? connection.refresh_token,
+      access_token: encryptHubSpotToken(refreshedTokens.access_token),
+      refresh_token: encryptHubSpotToken(refreshedTokens.refresh_token ?? refreshToken),
       token_expires_at: tokenExpiresAt,
       status: "connected",
       last_error: null,

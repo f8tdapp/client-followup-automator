@@ -2,13 +2,17 @@ import {
   CampaignScheduleOperationError,
   createEmptyDailySendPlan,
   createStarterCampaign,
-  enrollEligibleContactsInStarterCampaign,
+  enrollEligibleContactsInCampaign,
   formatSupabaseError,
   generateDailySendSchedule,
   getDailySendPlan,
   isSuppressionDiagnosticsError,
   resetStarterCampaignCopy,
 } from "@/lib/campaign-schedule";
+import {
+  CampaignEnrollmentConflictError,
+} from "@/lib/campaign-enrollment";
+import { authorizeOwner } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +27,8 @@ type CampaignScheduleAction = (typeof allowedActions)[number] | "generate";
 type CampaignScheduleBody =
   | {
       action: string;
+      campaignId: string | null;
+      confirmedEligibleCount: number | null;
       parseError: null;
     }
   | {
@@ -31,6 +37,8 @@ type CampaignScheduleBody =
     };
 
 export async function GET() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     const plan = await getDailySendPlan();
 
@@ -98,6 +106,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   let routeBranch = "unparsed";
 
   console.info("[campaign-schedule] request", {
@@ -150,10 +160,44 @@ export async function POST(request: Request) {
       routeBranch: action,
     });
 
-    const plan = await runCampaignScheduleAction(action);
+    if (
+      action === "enroll_eligible_contacts" &&
+      (body.confirmedEligibleCount === null || body.campaignId === null)
+    ) {
+      return Response.json(
+        {
+          ok: false,
+          error:
+            "Campaign ID and the confirmed eligible contact count are required before enrolling.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const plan = await runCampaignScheduleAction(
+      action,
+      body.campaignId,
+      body.confirmedEligibleCount,
+    );
 
     return Response.json(plan);
   } catch (scheduleError) {
+    if (scheduleError instanceof CampaignEnrollmentConflictError) {
+      return Response.json(
+        {
+          ok: false,
+          error: scheduleError.message,
+          details: scheduleError.message,
+          enrollmentResult: scheduleError.result,
+          operation:
+            scheduleError.result.result === "paused"
+              ? "enroll_eligible_contacts.pause_guard"
+              : "enroll_eligible_contacts.count_guard",
+        },
+        { status: 409 },
+      );
+    }
+
     if (isSuppressionDiagnosticsError(scheduleError)) {
       console.warn("[campaign-schedule] diagnostics warning", {
         method: request.method,
@@ -264,17 +308,36 @@ async function readCampaignScheduleBody(
   const rawBody = await request.text();
 
   if (!rawBody.trim()) {
-    return { action: "generate_today", parseError: null };
+    return {
+      action: "generate_today",
+      campaignId: null,
+      confirmedEligibleCount: null,
+      parseError: null,
+    };
   }
 
   try {
-    const body = JSON.parse(rawBody) as { action?: unknown };
+    const body = JSON.parse(rawBody) as {
+      action?: unknown;
+      campaignId?: unknown;
+      confirmedEligibleCount?: unknown;
+    };
 
     return {
       action:
         typeof body.action === "string" && body.action.trim()
           ? body.action.trim()
           : "generate_today",
+      campaignId:
+        typeof body.campaignId === "string" && body.campaignId.trim()
+          ? body.campaignId.trim()
+          : null,
+      confirmedEligibleCount:
+        typeof body.confirmedEligibleCount === "number" &&
+        Number.isSafeInteger(body.confirmedEligibleCount) &&
+        body.confirmedEligibleCount >= 0
+          ? body.confirmedEligibleCount
+          : null,
       parseError: null,
     };
   } catch {
@@ -297,13 +360,20 @@ function normalizeCampaignScheduleAction(action: string): CampaignScheduleAction
   return null;
 }
 
-async function runCampaignScheduleAction(action: CampaignScheduleAction) {
+async function runCampaignScheduleAction(
+  action: CampaignScheduleAction,
+  campaignId: string | null,
+  confirmedEligibleCount: number | null,
+) {
   if (action === "create_starter_campaign") {
     return createStarterCampaign();
   }
 
   if (action === "enroll_eligible_contacts") {
-    return enrollEligibleContactsInStarterCampaign();
+    return enrollEligibleContactsInCampaign(
+      campaignId ?? "",
+      confirmedEligibleCount ?? 0,
+    );
   }
 
   if (action === "reset_starter_campaign_copy") {

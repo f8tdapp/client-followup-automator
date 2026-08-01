@@ -1,6 +1,10 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { allocatePreparedDailyGeneration } from "@/lib/schedule-preparation";
 import {
+  CampaignEnrollmentConflictError,
+  runAtomicCampaignEnrollment,
+} from "@/lib/campaign-enrollment";
+import {
   getDefaultCampaignStep,
   mergeCampaignSteps,
   planCampaignStepRepairs,
@@ -23,6 +27,7 @@ type CampaignRow = {
   daily_limit: number;
   daily_send_limit: number | null;
   new_contacts_per_day: number | null;
+  new_enrollments_paused: boolean | null;
   broker_domain_daily_limit: number | null;
   cooldown_days: number;
   stop_on_reply: boolean | null;
@@ -560,7 +565,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
       supabaseAdmin
         .from("campaigns")
         .select(
-          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
         )
         .eq("name", "Real Estate Agent Follow-Up")
         .limit(1)
@@ -600,7 +605,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
           })
           .eq("id", campaign.id)
           .select(
-            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
           )
           .single<CampaignRow>(),
     );
@@ -638,7 +643,7 @@ export async function createStarterCampaign(date = getTodayDate()) {
             updated_at: new Date().toISOString(),
           })
           .select(
-            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+            "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
           )
           .single<CampaignRow>(),
     );
@@ -679,26 +684,41 @@ export async function createStarterCampaign(date = getTodayDate()) {
   };
 }
 
-export async function enrollEligibleContactsInStarterCampaign(date = getTodayDate()) {
-  const campaigns = await getActiveCampaigns();
-  const campaign =
-    campaigns.find((activeCampaign) => activeCampaign.name === "Real Estate Agent Follow-Up") ??
-    campaigns[0];
-
-  if (!campaign) {
-    return getDailySendPlan(date);
-  }
-
-  await enrollQualifiedContacts(campaign, date);
-  console.info("[campaign-schedule] main action success", {
-    action: "enroll_eligible_contacts",
-    campaignId: campaign.id,
+export async function enrollEligibleContactsInCampaign(
+  campaignId: string,
+  expectedEligibleCount: number,
+  date = getTodayDate(),
+) {
+  const enrollmentResult = await runAtomicCampaignEnrollment({
+    campaignId,
+    confirmedEligibleCount: expectedEligibleCount,
+    enrollmentDate: date,
   });
 
-  return getSafeDailySendPlanAfterAction(
+  if (
+    enrollmentResult.result === "paused" ||
+    enrollmentResult.result === "stale_count"
+  ) {
+    throw new CampaignEnrollmentConflictError(enrollmentResult);
+  }
+
+  console.info("[campaign-schedule] main action success", {
+    action: "enroll_eligible_contacts",
+    campaignId,
+    enrollmentResult: enrollmentResult.result,
+    enrolledCount: enrollmentResult.inserted_count,
+  });
+
+  const plan = await getSafeDailySendPlanAfterAction(
     date,
     "Eligible contacts were enrolled. Today's send plan could not refresh yet.",
   );
+  return {
+    ...plan,
+    enrolledCount: enrollmentResult.inserted_count,
+    enrollmentResult,
+    message: enrollmentResult.message,
+  };
 }
 
 export async function resetStarterCampaignCopy(date = getTodayDate()) {
@@ -713,7 +733,7 @@ export async function resetStarterCampaignCopy(date = getTodayDate()) {
       supabaseAdmin
         .from("campaigns")
         .select(
-          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+          "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
         )
         .eq("name", "Real Estate Agent Follow-Up")
         .limit(1)
@@ -787,7 +807,7 @@ async function getActiveCampaigns() {
     supabaseAdmin
       .from("campaigns")
       .select(
-        "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+        "id,name,description,status,daily_limit,daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
       )
       .eq("status", "active")
       .order("created_at", { ascending: true })
@@ -814,6 +834,7 @@ async function assertCampaignScheduleSchema() {
     columns: [
       "daily_send_limit",
       "new_contacts_per_day",
+      "new_enrollments_paused",
       "broker_domain_daily_limit",
       "cooldown_days",
       "stop_on_reply",
@@ -825,7 +846,7 @@ async function assertCampaignScheduleSchema() {
     supabaseAdmin
       .from("campaigns")
       .select(
-        "daily_send_limit,new_contacts_per_day,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
+        "daily_send_limit,new_contacts_per_day,new_enrollments_paused,broker_domain_daily_limit,cooldown_days,stop_on_reply,stop_on_bounce,stop_on_unsubscribe",
       )
       .limit(1),
   );
@@ -860,6 +881,7 @@ function isMissingCampaignScheduleSchemaError(error: SupabaseErrorLike) {
   return (
     haystack.includes("daily_send_limit") ||
     haystack.includes("new_contacts_per_day") ||
+    haystack.includes("new_enrollments_paused") ||
     haystack.includes("broker_domain_daily_limit") ||
     haystack.includes("stop_on_reply") ||
     haystack.includes("stop_on_bounce") ||
@@ -1124,79 +1146,6 @@ async function persistCampaignStepRepairs(stepRepairs: CampaignStepRepairRow[]) 
   });
 
   return upsertedSteps ?? [];
-}
-
-async function enrollQualifiedContacts(campaign: CampaignRow, date: string) {
-  const supabaseAdmin = getSupabaseAdmin();
-  const { data: contacts, error: contactsError } = await supabaseAdmin
-    .from("hubspot_contacts")
-    .select(
-      "id,hubspot_contact_id,email,first_name,last_name,company,is_unsubscribed,last_contacted_at,last_engaged_at,raw_properties",
-    )
-    .not("email", "is", null)
-    .eq("is_unsubscribed", false)
-    .returns<HubSpotContactScheduleRow[]>();
-
-  if (contactsError) {
-    throw new Error(contactsError.message);
-  }
-
-  if (!contacts || contacts.length === 0) {
-    return 0;
-  }
-
-  const suppressionRules = await getOptionalSuppressionRulesForDiagnostics(
-    contacts.map((contact) => contact.id),
-  );
-  if (suppressionRules.warning) {
-    console.warn("[campaign-schedule] diagnostics.contact_suppression_rules warning", {
-      action: "enroll_eligible_contacts",
-      warning: suppressionRules.warning,
-    });
-  }
-
-  const { data: existingEnrollments, error: enrollmentsError } =
-    await supabaseAdmin
-      .from("contact_campaign_enrollments")
-      .select("contact_id")
-      .eq("campaign_id", campaign.id)
-      .returns<Array<{ contact_id: string }>>();
-
-  if (enrollmentsError) {
-    throw new Error(enrollmentsError.message);
-  }
-
-  const enrolledContactIds = new Set(
-    (existingEnrollments ?? []).map((enrollment) => enrollment.contact_id),
-  );
-  const rows = contacts
-    .filter((contact) => !enrolledContactIds.has(contact.id))
-    .filter(
-      (contact) =>
-        (suppressionRules.rulesByContact.get(contact.id) ?? []).length === 0,
-    )
-    .map((contact) => ({
-      contact_id: contact.id,
-      campaign_id: campaign.id,
-      current_step: 1,
-      status: "active",
-      next_send_date: date,
-      updated_at: new Date().toISOString(),
-    }));
-
-  if (rows.length === 0) {
-    return 0;
-  }
-
-  const { error } = await supabaseAdmin
-    .from("contact_campaign_enrollments")
-    .upsert(rows, { onConflict: "contact_id,campaign_id" });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return rows.length;
 }
 
 async function getScheduleDiagnostics(

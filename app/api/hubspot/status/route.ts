@@ -2,10 +2,13 @@ import {
   getHubSpotConnectionStatus,
   getHubSpotHealth,
 } from "@/lib/hubspot-sync";
+import { authorizeOwner } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     const connection = await getHubSpotConnectionStatus();
     let health = {

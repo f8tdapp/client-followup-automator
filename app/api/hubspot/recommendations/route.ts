@@ -2,10 +2,13 @@ import {
   generateDailyRecommendations,
   getDailyRecommendations,
 } from "@/lib/hubspot-sync";
+import { authorizeOwner } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     const recommendations = await getDailyRecommendations();
 
@@ -24,6 +27,8 @@ export async function GET() {
 }
 
 export async function POST() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     const recommendationsCreated = await generateDailyRecommendations();
     const recommendations = await getDailyRecommendations();

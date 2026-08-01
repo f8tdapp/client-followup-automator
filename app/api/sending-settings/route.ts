@@ -7,6 +7,7 @@ import {
   ResendProviderError,
   sendResendTestEmail,
 } from "@/lib/resend-provider";
+import { authorizeOwner } from "@/lib/authorization";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -31,6 +32,8 @@ type SendingSettingsBody =
     };
 
 export async function GET() {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   try {
     return Response.json({
       ok: true,
@@ -42,6 +45,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const authorization = await authorizeOwner();
+  if (!authorization.ok) return authorization.response;
   let routeBranch = "unparsed";
 
   console.info("[sending-settings] request", {
