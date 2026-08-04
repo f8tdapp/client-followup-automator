@@ -2,6 +2,8 @@
 
 Migration 012 is intentionally **unapplied**. Public signup, workspace switching, and Stripe checkout/billing are not implemented. Until every server route is converted in one reviewed change, the deployed application must remain on the existing email-allowlisted, single-owner boundary.
 
+Migration 013 is also intentionally **unapplied**. It must follow 012 and replaces the global enrollment RPC with a service-role-only function requiring both the authorized workspace ID and campaign ID. The runtime does not call the new signature yet.
+
 ## Model
 
 `workspaces` is the customer boundary. A workspace may be `free`, `trialing`, `active`, `past_due`, `suspended`, or `cancelled`; Stripe customer and subscription IDs are nullable placeholders. `workspace_members` joins a Supabase Auth user to a workspace with an `owner`, `admin`, or `member` role and an active/inactive status.
@@ -31,3 +33,9 @@ Take a database backup and record per-table row counts before isolated validatio
 ## Runtime conversion still required
 
 Before Migration 012 can be considered application-ready, convert every privileged route and helper together: dashboard, campaigns/templates/steps, enrollment RPC and counts, scheduling/limits/suppressions, drafts, sending settings, forecast, recommendations, and all HubSpot connection/token/sync/health operations. Every read needs `workspace_id = authorizedWorkspace`; every insert must set it; every update/delete/upsert and RPC must include it. Add two-workspace integration tests against a disposable database, including hostile update/delete IDs and identical HubSpot IDs. No mixed single-tenant/multi-tenant runtime is safe to deploy.
+
+The OAuth-state primitive in `lib/hubspot-oauth-state.ts` signs short-lived user/workspace/nonce claims and rejects expiry, tampering, and mismatched identities. It uses the dedicated server-only `PIPELINECUE_OAUTH_STATE_SECRET`, not the HubSpot client secret. Configure that variable separately in staging and production later with at least 32 bytes of cryptographically random material; never expose it to browser code or commit its value. No environment file is changed by this foundation work. The primitive is deliberately not connected to the OAuth routes at this checkpoint. When runtime conversion is completed, the connect route must create it from the verified user and server-resolved workspace, the callback must independently authorize and compare both claims, and the nonce returned in the verified claims must be atomically consumed exactly once (for example, by matching and deleting an HTTP-only nonce cookie or a server-side nonce record) before exchanging the code.
+
+## Safe staging validation
+
+Use only a disposable database restored from a sanitized backup. Record row counts, take a restorable snapshot, apply 012 then 013, and run two-workspace isolation tests using fictional data. Do not point the application at that database until every runtime query has been converted. Restore/discard the database on any failure. Production and shared staging remain out of scope.
