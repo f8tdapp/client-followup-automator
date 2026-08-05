@@ -78,7 +78,7 @@ begin
   select requested_workspace_id, eligible.contact_id, requested_campaign_id, 1, 1,
     'active', enrollment_date, enrollment_date, pg_catalog.now()
   from pg_temp.eligible_campaign_contacts eligible
-  on conflict (contact_id, campaign_id) do nothing;
+  on conflict (workspace_id, contact_id, campaign_id) do nothing;
   get diagnostics calculated_inserted_count = row_count;
   if calculated_inserted_count <> calculated_eligible_count then
     raise exception 'Concurrent enrolment changed the eligible set; no contacts were enrolled.';

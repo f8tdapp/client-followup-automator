@@ -57,6 +57,11 @@ begin
   end loop;
 end $$;
 
+-- Explicitly retain this statement even though the owned-table loop above also
+-- enables RLS. It makes the clients security invariant visible to schema
+-- auditors and is safely repeatable.
+alter table public.clients enable row level security;
+
 create index workspace_members_user_active_idx on public.workspace_members(user_id, status);
 create index workspace_members_workspace_role_idx on public.workspace_members(workspace_id, role);
 
@@ -123,5 +128,10 @@ revoke all privileges on table
   public.broker_domain_limits, public.contact_suppression_rules,
   public.email_drafts, public.sending_settings
 from anon, authenticated;
+
+-- PipelineCue accesses clients only through its server-side service-role client.
+-- Remove broader legacy table grants before restoring the required CRUD surface.
+revoke all privileges on table public.clients from service_role;
+grant select, insert, update, delete on table public.clients to service_role;
 
 notify pgrst, 'reload schema';

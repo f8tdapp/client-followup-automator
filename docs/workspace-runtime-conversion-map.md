@@ -1,6 +1,6 @@
 # Workspace runtime conversion map
 
-Status: inspection-only checkpoint at `5b232c35ba868335aa0cad70d361300e9cc33b4b`. Runtime remains single-owner. Migrations 012/013 and the workspace/OAuth primitives remain inactive.
+Status: foundation checkpoint. Runtime remains single-owner. Migrations 012–014 and the workspace/OAuth primitives remain inactive. All 88 operations below remain pending.
 
 Exact database call-site count: **88** (87 `.from(...)`, one `.rpc(...)`) across 10 files. Authorization-only routes/helpers are also guarded by the static inventory test.
 
@@ -71,12 +71,12 @@ The following must change with their domain even though their database work is i
 7. **B7 HubSpot:** connect/callback/status/sync/recommendations routes; callback/state/token/sync helpers; OAuth and two-portal tests.
 8. **B8 final audit:** remove `authorizeOwner` runtime use, audit every service-role call, hostile cross-tenant integration suite, and only then activate 012→013→runtime in isolated staging.
 
-## Database gaps requiring Migration 014
+## Migration 014 foundation coverage
 
-- Add unique constraints/indexes matching actual composite upsert targets: `(workspace_id,campaign_id,step_number)`, `(workspace_id,contact_id,campaign_id,campaign_step_id,scheduled_date)`, and `(workspace_id,schedule_id)`. Existing global constraints do not provide valid PostgREST `onConflict` targets with workspace included.
-- Consider changing enrollment uniqueness to `(workspace_id,contact_id,campaign_id)` and update Migration 013 `ON CONFLICT`; UUID PKs currently make the global pair safe but preserve a global assumption.
-- Add a workspace-consistent relationship from recommendations to contacts for embedded PostgREST joins (012 has it) and verify PostgREST chooses the composite FK unambiguously after the old FK is dropped.
-- If nonce consumption uses the database rather than an HTTP-only cookie, add an OAuth nonce table with hashed nonce, user, workspace, expiry, consumed timestamp, unique nonce, RLS, and service-role-only privileges.
+- Completed in the unapplied Migration 014: composite campaign-step, schedule, draft, and enrollment unique indexes matching future PostgREST conflict targets.
+- Completed in unapplied migrations: Migration 013 now uses `(workspace_id,contact_id,campaign_id)` and 014 supplies that unique index.
+- Completed in the unapplied Migration 014: the recommendation/contact composite FK is recreated under one explicit name; disposable PostgREST schema validation remains required.
+- Completed in the unapplied Migration 014: digest-only OAuth nonce storage and a database-time, exact-once, service-role-only consume function.
 - No missing base workspace indexes were found for ordinary `.eq(workspace_id, ...)` reads; 012 creates one per owned table.
 
 Static matching does not prove tenant isolation. The guard locks the reviewed file set and exact counts for `.from(...)`, `.rpc(...)`, `getSupabaseAdmin`, `supabaseAdmin`, and `authorizeOwner`; it only prevents that inventory from drifting unnoticed. B8 still requires semantic review and disposable-database integration tests.

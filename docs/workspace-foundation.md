@@ -2,7 +2,7 @@
 
 Migration 012 is intentionally **unapplied**. Public signup, workspace switching, and Stripe checkout/billing are not implemented. Until every server route is converted in one reviewed change, the deployed application must remain on the existing email-allowlisted, single-owner boundary.
 
-Migration 013 is also intentionally **unapplied**. It must follow 012 and replaces the global enrollment RPC with a service-role-only function requiring both the authorized workspace ID and campaign ID. The runtime does not call the new signature yet.
+Migrations 013 and 014 are also intentionally **unapplied**. Apply them only in order after 012. Migration 013 replaces the global enrollment RPC with a service-role-only function requiring both the authorized workspace ID and campaign ID; Migration 014 adds workspace conflict targets and exact-once OAuth nonce storage. The runtime does not call either primitive yet.
 
 ## Model
 
@@ -38,4 +38,18 @@ The OAuth-state primitive in `lib/hubspot-oauth-state.ts` signs short-lived user
 
 ## Safe staging validation
 
-Use only a disposable database restored from a sanitized backup. Record row counts, take a restorable snapshot, apply 012 then 013, and run two-workspace isolation tests using fictional data. Do not point the application at that database until every runtime query has been converted. Restore/discard the database on any failure. Production and shared staging remain out of scope.
+Use only a disposable database restored from a sanitized backup. Record row counts, take a restorable snapshot, apply 012 then 013 then 014, and run two-workspace isolation tests using fictional data. Do not point the application at that database until every runtime query has been converted. Restore/discard the database on any failure. Production and shared staging remain out of scope.
+
+Security-audit checklist for that future isolated validation:
+
+- Confirm `public.clients` has RLS enabled:
+
+  ```sql
+  select relrowsecurity
+  from pg_catalog.pg_class
+  where oid = 'public.clients'::regclass;
+  ```
+
+  The single result must be `true`.
+- Confirm `anon` and `authenticated` have no privileges on `public.clients` and that no permissive/full-access client policy exists.
+- Confirm `service_role` access remains server-only and limited to PipelineCue's required table operations.
