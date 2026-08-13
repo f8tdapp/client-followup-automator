@@ -171,7 +171,7 @@ owner to postgres;
 -- direct table privileges. This is not a multi-tenant ownership policy.
 alter table public.clients enable row level security;
 
-revoke usage on schema public from anon, authenticated;
+revoke usage on schema public from PUBLIC, anon, authenticated;
 grant usage on schema public to service_role;
 
 revoke all privileges on all sequences in schema public from anon, authenticated;
