@@ -2,12 +2,12 @@ import {
   getCampaignEnrollmentOverview,
   setNewEnrollmentsPaused,
 } from "@/lib/campaign-enrollment";
-import { authorizeOwner } from "@/lib/authorization";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   try {
     return Response.json({ overview: await getCampaignEnrollmentOverview() });
@@ -25,7 +25,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   let body: {
     campaignId?: unknown;

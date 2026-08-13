@@ -7,7 +7,7 @@ import {
   ResendProviderError,
   sendResendTestEmail,
 } from "@/lib/resend-provider";
-import { authorizeOwner } from "@/lib/authorization";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,7 +32,7 @@ type SendingSettingsBody =
     };
 
 export async function GET() {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   try {
     return Response.json({
@@ -45,7 +45,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   let routeBranch = "unparsed";
 

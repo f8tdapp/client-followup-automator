@@ -1,12 +1,12 @@
 # Workspace runtime conversion map
 
-Status: foundation checkpoint. Runtime remains single-owner. Migrations 012–014 and the workspace/OAuth primitives remain inactive. All 88 operations below remain pending.
+Status: Batch B1 shared runtime authorization context complete locally. Runtime remains single-owner and domain operations remain unconverted. Migrations 012–014 and the OAuth primitives remain inactive. Of the 88 database call sites below, only the trusted membership lookup is B1-complete; all 87 domain operations remain pending.
 
 Exact database call-site count: **88** (87 `.from(...)`, one `.rpc(...)`) across 10 files. Authorization-only routes/helpers are also guarded by the static inventory test.
 
 ## Reading the inventory
 
-Every row is `pending`. Current authorization (`Auth`) is `O` for a route directly guarded by `authorizeOwner`, `C` for a helper whose route caller is owner-guarded, and `W` for the inactive membership resolver itself. Trusted workspace (`WS`) is always `authorizeWorkspace().workspaceId`, never request input; helpers must receive it as a required argument. `eq` means add `.eq("workspace_id", workspaceId)`; `set` means insert/upsert `workspace_id`; mutations require both. Foreign IDs (`FK`) must be constrained by the same workspace, not merely trusted because UUIDs are globally unique. Tests (`T`) are: `I` two-workspace read isolation, `M` hostile mutation ID, `F` same-workspace foreign relationship, `U` composite upsert collision, `C` workspace-specific counts/capacity, `A` concurrency/atomicity, `O` OAuth identity/state. Dependencies (`D`) name the batch below.
+Every domain row remains `pending`; only the B1 membership lookup is `complete`. Current authorization (`Auth`) is `R` for a route guarded by `getWorkspaceRuntimeContext`, `C` for a helper whose route caller has that guard, and `W` for the membership resolver itself. Trusted workspace (`WS`) is always `authorizeWorkspace().workspaceId`, never request input; helpers must receive it as a required argument in their domain conversion batch. `eq` means add `.eq("workspace_id", workspaceId)`; `set` means insert/upsert `workspace_id`; mutations require both. Foreign IDs (`FK`) must be constrained by the same workspace, not merely trusted because UUIDs are globally unique. Tests (`T`) are: `I` two-workspace read isolation, `M` hostile mutation ID, `F` same-workspace foreign relationship, `U` composite upsert collision, `C` workspace-specific counts/capacity, `A` concurrency/atomicity, `O` OAuth identity/state. Dependencies (`D`) name the batch below.
 
 Conflict targets required after 012: HubSpot connections `workspace_id,provider`; contacts `workspace_id,hubspot_contact_id`; recommendations `workspace_id,recommendation_date,hubspot_contact_id`; domain limits `workspace_id,broker_domain`; sending settings should use `workspace_id,provider`. Campaign steps require a Migration 014 target `workspace_id,campaign_id,step_number`; schedules require `workspace_id,contact_id,campaign_id,campaign_step_id,scheduled_date`; drafts require `workspace_id,schedule_id`.
 
@@ -14,16 +14,16 @@ Conflict targets required after 012: HubSpot connections `workspace_id,provider`
 
 | Location / function | Target · operation | Auth / WS action | Conflict or FK validation | T | D | Status |
 |---|---|---|---|---|---|---|
-| `lib/workspace-authorization.ts:63` `authorizeWorkspace` | workspace_members · select | W; user-id membership lookup (workspace is result) | workspace status/member active | I | B1 | pending |
-| `app/api/dashboard-data/route.ts:29,37,38,39,54` `GET` | clients, campaigns, email_templates, campaign_steps, client_events · 5 selects | O; eq each | campaign/template/step and client/event joins same WS | I,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:84,89` `POST update_client` | clients update; client_events insert | O; eq+set | browser client ID; event client FK | M,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:106,111` `POST import_clients` | clients insert; client_events insert | O; set each row | returned client IDs feed events in same WS | I,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:125` `POST delete_campaign` | campaigns · delete | O; eq | browser campaign ID, cascades | M | B2 | pending |
-| `app/api/dashboard-data/route.ts:126` `POST update_campaign` | campaigns · update | O; eq | browser campaign ID | M | B2 | pending |
-| `app/api/dashboard-data/route.ts:136` `POST create_template` | email_templates · insert | O; set | browser campaign ID | F | B2 | pending |
-| `app/api/dashboard-data/route.ts:148` `POST update_step` | campaign_steps · update | O; eq | browser step ID | M,F | B2 | pending |
-| `app/api/campaigns/route.ts:61` `POST` | campaigns · update | O; eq | browser campaign ID | M | B2 | pending |
-| `app/api/campaigns/route.ts:66` `POST` | campaigns · insert | O; set | none | I | B2 | pending |
+| `lib/workspace-authorization.ts:63` `authorizeWorkspace` | workspace_members · select | W; user-id membership lookup (workspace is result) | workspace status/member active | I | B1 | complete |
+| `app/api/dashboard-data/route.ts:29,37,38,39,54` `GET` | clients, campaigns, email_templates, campaign_steps, client_events · 5 selects | R; eq each | campaign/template/step and client/event joins same WS | I,F | B2 | pending |
+| `app/api/dashboard-data/route.ts:84,89` `POST update_client` | clients update; client_events insert | R; eq+set | browser client ID; event client FK | M,F | B2 | pending |
+| `app/api/dashboard-data/route.ts:106,111` `POST import_clients` | clients insert; client_events insert | R; set each row | returned client IDs feed events in same WS | I,F | B2 | pending |
+| `app/api/dashboard-data/route.ts:125` `POST delete_campaign` | campaigns · delete | R; eq | browser campaign ID, cascades | M | B2 | pending |
+| `app/api/dashboard-data/route.ts:126` `POST update_campaign` | campaigns · update | R; eq | browser campaign ID | M | B2 | pending |
+| `app/api/dashboard-data/route.ts:136` `POST create_template` | email_templates · insert | R; set | browser campaign ID | F | B2 | pending |
+| `app/api/dashboard-data/route.ts:148` `POST update_step` | campaign_steps · update | R; eq | browser step ID | M,F | B2 | pending |
+| `app/api/campaigns/route.ts:61` `POST` | campaigns · update | R; eq | browser campaign ID | M | B2 | pending |
+| `app/api/campaigns/route.ts:66` `POST` | campaigns · insert | R; set | none | I | B2 | pending |
 | `lib/sending-settings.ts:66,80,104` `get/upsertSendingSettings` | sending_settings · select, insert, update | C; eq/set/eq | one row per WS/provider | I,M,C | B3 | pending |
 | `lib/campaign-enrollment.ts:212` `setNewEnrollmentsPaused` | campaigns · update | C; eq | browser campaign ID | M,F | B4 | pending |
 | `lib/campaign-enrollment.ts:231,243,253,263,274` summary source | campaigns, contacts, enrollments, suppressions, steps · 5 selects | C; eq each | all campaign/contact IDs same WS | I,F,C | B4 | pending |
@@ -48,7 +48,7 @@ Conflict targets required after 012: HubSpot connections `workspace_id,provider`
 | `lib/email-drafts.ts:462,487,515` loaders | schedules, drafts, schedules · 3 selects | C; eq | browser/derived IDs | I,F | B6 | pending |
 | `lib/email-drafts.ts:543,575,598` manual progress | enrollments select, steps select, enrollments update | C; eq | schedule campaign/contact and enrollment/step | M,F,A | B6 | pending |
 | `lib/email-drafts.ts:621,665,697` batch loaders | drafts, contacts, steps · 3 selects | C; eq | IDs from scoped schedules | I,F | B6 | pending |
-| `app/api/hubspot/callback/route.ts:19` `persistOAuthTokens` | hubspot_connections · upsert | O; set from callback authorization | signed user/WS state; conflict `workspace_id,provider` | O,U | B7 | pending |
+| `app/api/hubspot/callback/route.ts:19` `persistOAuthTokens` | hubspot_connections · upsert | R; set from callback authorization | signed user/WS state; conflict `workspace_id,provider` | O,U | B7 | pending |
 | `lib/hubspot-sync.ts:39,59,90` connection/status | connections, contacts, contacts · 3 selects | C; eq | private-token mode must be explicitly legacy-only or removed | I,C | B7 | pending |
 | `lib/hubspot-sync.ts:136` token refresh | connections · update | C; eq | connection belongs to WS | M,O | B7 | pending |
 | `lib/hubspot-sync.ts:171,183` sync | contacts upsert; connections upsert | C; set | composite conflicts for both | U,I | B7 | pending |
@@ -62,7 +62,7 @@ The following must change with their domain even though their database work is i
 
 ## Safe batches and dependency order
 
-1. **B1 shared context:** `workspace-authorization.ts`, all protected routes, route auth tests. Establish required `{user,workspaceId,role}` arguments without yet merging.
+1. **B1 shared context (complete locally):** `workspace-authorization.ts`, `workspace-runtime-context.ts`, all protected routes, callback authorization helper, route auth tests, and static inventory. Establish trusted `{user,workspaceId,role,source,supabaseAdmin}` at each protected entry point without applying workspace filters or claiming domain isolation.
 2. **B2 dashboard/config:** dashboard and campaigns routes together; clients/events/campaigns/templates/steps isolation tests.
 3. **B3 settings/limits:** `sending-settings.ts` and route plus schedule/forecast consumers of settings and domain limits.
 4. **B4 enrollment:** `campaign-enrollment.ts`, route, Migration 013 caller/tests. Must land atomically with 012/013 deployment ordering.
@@ -79,4 +79,4 @@ The following must change with their domain even though their database work is i
 - Completed in the unapplied Migration 014: digest-only OAuth nonce storage and a database-time, exact-once, service-role-only consume function.
 - No missing base workspace indexes were found for ordinary `.eq(workspace_id, ...)` reads; 012 creates one per owned table.
 
-Static matching does not prove tenant isolation. The guard locks the reviewed file set and exact counts for `.from(...)`, `.rpc(...)`, `getSupabaseAdmin`, `supabaseAdmin`, and `authorizeOwner`; it only prevents that inventory from drifting unnoticed. B8 still requires semantic review and disposable-database integration tests.
+Static matching does not prove tenant isolation. The guard locks the reviewed file set and exact counts for `.from(...)`, `.rpc(...)`, `getSupabaseAdmin`, `supabaseAdmin`, `authorizeOwner`, and `getWorkspaceRuntimeContext`; it also rejects straightforward privileged import aliasing and direct service-role client construction outside the reviewed factories. It only prevents that inventory from drifting unnoticed. B8 still requires semantic review and disposable-database integration tests.

@@ -1,11 +1,11 @@
 import { getHubSpotAuthorizationUrl } from "@/lib/hubspot";
-import { authorizeOwner } from "@/lib/authorization";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 import { cookies } from "next/headers";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   const state = crypto.randomUUID();
 

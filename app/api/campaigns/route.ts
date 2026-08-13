@@ -1,5 +1,4 @@
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { authorizeOwner } from "@/lib/authorization";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 import {
   DEFAULT_NEW_CONTACTS_PER_DAY,
   DEFAULT_TOTAL_DAILY_LIMIT,
@@ -16,7 +15,7 @@ type CampaignInput = {
 };
 
 export async function POST(request: Request) {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   let input: CampaignInput;
 
@@ -55,7 +54,7 @@ export async function POST(request: Request) {
     updated_at: new Date().toISOString(),
   };
   const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : null;
-  const supabaseAdmin = getSupabaseAdmin();
+  const { supabaseAdmin } = authorization.context;
   const query = id
     ? supabaseAdmin
         .from("campaigns")

@@ -2,12 +2,12 @@ import {
   getHubSpotConnectionStatus,
   getHubSpotHealth,
 } from "@/lib/hubspot-sync";
-import { authorizeOwner } from "@/lib/authorization";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
   try {
     const connection = await getHubSpotConnectionStatus();

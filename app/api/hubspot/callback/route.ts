@@ -1,6 +1,5 @@
 import { exchangeOAuthCodeForTokens, getHubSpotScopes } from "../../../../lib/hubspot.ts";
-import { getSupabaseAdmin } from "../../../../lib/supabase-admin.ts";
-import { authorizeOwner } from "../../../../lib/authorization.ts";
+import { getWorkspaceRuntimeContext, type WorkspaceRuntimeContext } from "../../../../lib/workspace-runtime-context.ts";
 import { cookies } from "next/headers";
 import { encryptHubSpotToken } from "../../../../lib/hubspot-token-crypto.ts";
 import { createHubSpotCallbackHandler, type HubSpotOAuthTokens } from "../../../../lib/hubspot-callback.ts";
@@ -14,9 +13,9 @@ async function consumeOAuthState() {
   return expectedState;
 }
 
-async function persistOAuthTokens(tokens: HubSpotOAuthTokens) {
+async function persistOAuthTokens(tokens: HubSpotOAuthTokens, context: WorkspaceRuntimeContext) {
   const tokenExpiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
-  const { error } = await getSupabaseAdmin().from("hubspot_connections").upsert(
+  const { error } = await context.supabaseAdmin.from("hubspot_connections").upsert(
     {
       provider: "hubspot",
       portal_id: tokens.hub_id ? String(tokens.hub_id) : null,
@@ -35,7 +34,7 @@ async function persistOAuthTokens(tokens: HubSpotOAuthTokens) {
 
 export const GET = createHubSpotCallbackHandler({
   consumeState: consumeOAuthState,
-  authorize: authorizeOwner,
+  authorize: getWorkspaceRuntimeContext,
   exchange: exchangeOAuthCodeForTokens,
   persist: persistOAuthTokens,
 });

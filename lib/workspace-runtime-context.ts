@@ -34,8 +34,9 @@ export async function resolveWorkspaceRuntimeContext(
 }
 
 /**
- * Inactive shared server context. Existing routes must not import this until
- * their complete conversion batch is ready. It accepts no request workspace ID.
+ * Shared server authorization context. Domain helpers remain intentionally
+ * unscoped until their complete conversion batches. This accepts no request
+ * workspace ID.
  */
 export async function getWorkspaceRuntimeContext(): Promise<WorkspaceRuntimeContextResult> {
   const [{ authorizeWorkspace }, { getSupabaseAdmin }] = await Promise.all([

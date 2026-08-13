@@ -1,5 +1,4 @@
-import { authorizeOwner } from "@/lib/authorization";
-import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +16,12 @@ type DashboardMutation = {
 };
 
 export async function GET(request: Request) {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
 
   const url = new URL(request.url);
   const resource = url.searchParams.get("resource");
-  const supabase = getSupabaseAdmin();
+  const supabase = authorization.context.supabaseAdmin;
 
   if (resource === "clients") {
     const { data, error } = await supabase
@@ -63,7 +62,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const authorization = await authorizeOwner();
+  const authorization = await getWorkspaceRuntimeContext();
   if (!authorization.ok) return authorization.response;
 
   let input: DashboardMutation;
@@ -73,7 +72,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const supabase = getSupabaseAdmin();
+  const supabase = authorization.context.supabaseAdmin;
   const action = typeof input.action === "string" ? input.action : "";
 
   if (action === "create_client") {

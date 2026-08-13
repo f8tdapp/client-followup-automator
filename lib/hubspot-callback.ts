@@ -1,3 +1,5 @@
+import type { WorkspaceRuntimeContextResult } from "./workspace-runtime-context.ts";
+
 export type HubSpotOAuthTokens = {
   access_token: string;
   refresh_token: string;
@@ -8,11 +10,18 @@ export type HubSpotOAuthTokens = {
 
 export function createHubSpotCallbackHandler(dependencies: {
   consumeState: () => Promise<string | undefined>;
-  authorize: () => Promise<{ ok: boolean }>;
+  authorize: () => Promise<WorkspaceRuntimeContextResult>;
   exchange: (code: string) => Promise<HubSpotOAuthTokens>;
-  persist: (tokens: HubSpotOAuthTokens) => Promise<void>;
+  persist: (
+    tokens: HubSpotOAuthTokens,
+    context: Extract<WorkspaceRuntimeContextResult, { ok: true }>["context"],
+  ) => Promise<void>;
 }) {
   return async function hubSpotCallback(request: Request) {
+    const authorization = await dependencies.authorize();
+    if (!authorization.ok) {
+      return Response.redirect(new URL("/?hubspot=error&reason=owner_authorization_failed", request.url));
+    }
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const providerError = url.searchParams.get("error");
@@ -20,9 +29,6 @@ export function createHubSpotCallbackHandler(dependencies: {
     const expectedState = await dependencies.consumeState();
     if (!state || !expectedState || state !== expectedState) {
       return Response.redirect(new URL("/?hubspot=error&reason=oauth_state_invalid", url));
-    }
-    if (!(await dependencies.authorize()).ok) {
-      return Response.redirect(new URL("/?hubspot=error&reason=owner_authorization_failed", url));
     }
     if (providerError || !code) {
       return Response.redirect(new URL("/?hubspot=error&reason=oauth_exchange_failed", url));
@@ -35,7 +41,7 @@ export function createHubSpotCallbackHandler(dependencies: {
       return Response.redirect(new URL("/?hubspot=error&reason=oauth_exchange_failed", url));
     }
     try {
-      await dependencies.persist(tokens);
+      await dependencies.persist(tokens, authorization.context);
       return Response.redirect(new URL("/?hubspot=connected", url));
     } catch {
       console.error("[hubspot-callback] OAuth token storage failed", { code: "oauth_storage_failed" });
