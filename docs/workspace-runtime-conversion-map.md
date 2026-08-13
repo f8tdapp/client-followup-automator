@@ -1,12 +1,12 @@
 # Workspace runtime conversion map
 
-Status: Batch B1 shared runtime authorization context complete locally. Runtime remains single-owner and domain operations remain unconverted. Migrations 012–014 and the OAuth primitives remain inactive. Of the 88 database call sites below, only the trusted membership lookup is B1-complete; all 87 domain operations remain pending.
+Status: Batches B1–B2 complete locally. Runtime remains single-owner and all non-B2 domains remain unconverted. Migrations 012–014 and the OAuth primitives remain inactive. Of the 88 database call sites below, the trusted membership lookup and all 15 B2 dashboard/config call sites are complete; 72 domain operations remain pending.
 
 Exact database call-site count: **88** (87 `.from(...)`, one `.rpc(...)`) across 10 files. Authorization-only routes/helpers are also guarded by the static inventory test.
 
 ## Reading the inventory
 
-Every domain row remains `pending`; only the B1 membership lookup is `complete`. Current authorization (`Auth`) is `R` for a route guarded by `getWorkspaceRuntimeContext`, `C` for a helper whose route caller has that guard, and `W` for the membership resolver itself. Trusted workspace (`WS`) is always `authorizeWorkspace().workspaceId`, never request input; helpers must receive it as a required argument in their domain conversion batch. `eq` means add `.eq("workspace_id", workspaceId)`; `set` means insert/upsert `workspace_id`; mutations require both. Foreign IDs (`FK`) must be constrained by the same workspace, not merely trusted because UUIDs are globally unique. Tests (`T`) are: `I` two-workspace read isolation, `M` hostile mutation ID, `F` same-workspace foreign relationship, `U` composite upsert collision, `C` workspace-specific counts/capacity, `A` concurrency/atomicity, `O` OAuth identity/state. Dependencies (`D`) name the batch below.
+B1 and B2 rows are `complete`; every B3–B8 domain row remains `pending`. Current authorization (`Auth`) is `R` for a route guarded by `getWorkspaceRuntimeContext`, `C` for a helper whose route caller has that guard, and `W` for the membership resolver itself. Trusted workspace (`WS`) is always `authorizeWorkspace().workspaceId`, never request input; helpers must receive it as a required argument in their domain conversion batch. `eq` means add `.eq("workspace_id", workspaceId)`; `set` means insert/upsert `workspace_id`; mutations require both. Foreign IDs (`FK`) must be constrained by the same workspace, not merely trusted because UUIDs are globally unique. Tests (`T`) are: `I` two-workspace read isolation, `M` hostile mutation ID, `F` same-workspace foreign relationship, `U` composite upsert collision, `C` workspace-specific counts/capacity, `A` concurrency/atomicity, `O` OAuth identity/state. Dependencies (`D`) name the batch below.
 
 Conflict targets required after 012: HubSpot connections `workspace_id,provider`; contacts `workspace_id,hubspot_contact_id`; recommendations `workspace_id,recommendation_date,hubspot_contact_id`; domain limits `workspace_id,broker_domain`; sending settings should use `workspace_id,provider`. Campaign steps require a Migration 014 target `workspace_id,campaign_id,step_number`; schedules require `workspace_id,contact_id,campaign_id,campaign_step_id,scheduled_date`; drafts require `workspace_id,schedule_id`.
 
@@ -15,15 +15,15 @@ Conflict targets required after 012: HubSpot connections `workspace_id,provider`
 | Location / function | Target · operation | Auth / WS action | Conflict or FK validation | T | D | Status |
 |---|---|---|---|---|---|---|
 | `lib/workspace-authorization.ts:63` `authorizeWorkspace` | workspace_members · select | W; user-id membership lookup (workspace is result) | workspace status/member active | I | B1 | complete |
-| `app/api/dashboard-data/route.ts:29,37,38,39,54` `GET` | clients, campaigns, email_templates, campaign_steps, client_events · 5 selects | R; eq each | campaign/template/step and client/event joins same WS | I,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:84,89` `POST update_client` | clients update; client_events insert | R; eq+set | browser client ID; event client FK | M,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:106,111` `POST import_clients` | clients insert; client_events insert | R; set each row | returned client IDs feed events in same WS | I,F | B2 | pending |
-| `app/api/dashboard-data/route.ts:125` `POST delete_campaign` | campaigns · delete | R; eq | browser campaign ID, cascades | M | B2 | pending |
-| `app/api/dashboard-data/route.ts:126` `POST update_campaign` | campaigns · update | R; eq | browser campaign ID | M | B2 | pending |
-| `app/api/dashboard-data/route.ts:136` `POST create_template` | email_templates · insert | R; set | browser campaign ID | F | B2 | pending |
-| `app/api/dashboard-data/route.ts:148` `POST update_step` | campaign_steps · update | R; eq | browser step ID | M,F | B2 | pending |
-| `app/api/campaigns/route.ts:61` `POST` | campaigns · update | R; eq | browser campaign ID | M | B2 | pending |
-| `app/api/campaigns/route.ts:66` `POST` | campaigns · insert | R; set | none | I | B2 | pending |
+| `app/api/dashboard-data/route.ts` `GET` | clients, campaigns, email_templates, campaign_steps, client_events · 5 selects | R; eq each | campaign/template/step and client/event joins same WS | I,F | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST create/update_client` | clients insert/update; client_events insert | R; set/eq+set | browser client ID; event client FK | I,M,F | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST import_clients` | clients insert; client_events insert | R; set each row | returned client IDs feed events in same WS | I,F | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST delete_campaign` | campaigns · delete | R; eq | browser campaign ID, cascades | M | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST update_campaign` | campaigns · update | R; eq | browser campaign ID | M | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST create_template` | email_templates · insert | R; set | browser campaign ID | F | B2 | complete |
+| `app/api/dashboard-data/route.ts` `POST update_step` | campaign_steps · update | R; eq | browser step ID | M,F | B2 | complete |
+| `app/api/campaigns/route.ts` `POST update` | campaigns · update | R; eq | browser campaign ID | M | B2 | complete |
+| `app/api/campaigns/route.ts` `POST insert` | campaigns · insert | R; set | none | I | B2 | complete |
 | `lib/sending-settings.ts:66,80,104` `get/upsertSendingSettings` | sending_settings · select, insert, update | C; eq/set/eq | one row per WS/provider | I,M,C | B3 | pending |
 | `lib/campaign-enrollment.ts:212` `setNewEnrollmentsPaused` | campaigns · update | C; eq | browser campaign ID | M,F | B4 | pending |
 | `lib/campaign-enrollment.ts:231,243,253,263,274` summary source | campaigns, contacts, enrollments, suppressions, steps · 5 selects | C; eq each | all campaign/contact IDs same WS | I,F,C | B4 | pending |
@@ -63,7 +63,7 @@ The following must change with their domain even though their database work is i
 ## Safe batches and dependency order
 
 1. **B1 shared context (complete locally):** `workspace-authorization.ts`, `workspace-runtime-context.ts`, all protected routes, callback authorization helper, route auth tests, and static inventory. Establish trusted `{user,workspaceId,role,source,supabaseAdmin}` at each protected entry point without applying workspace filters or claiming domain isolation.
-2. **B2 dashboard/config:** dashboard and campaigns routes together; clients/events/campaigns/templates/steps isolation tests.
+2. **B2 dashboard/config (complete locally):** dashboard and campaigns routes use the trusted context workspace for every clients/events/campaigns/templates/steps read and mutation; inserts set it explicitly; Migration 012 defines composite foreign keys for same-workspace relationships. In-memory route tests cover query shape, trusted payloads, and hostile IDs, but do not prove real database isolation; disposable Postgres/PostgREST validation remains required.
 3. **B3 settings/limits:** `sending-settings.ts` and route plus schedule/forecast consumers of settings and domain limits.
 4. **B4 enrollment:** `campaign-enrollment.ts`, route, Migration 013 caller/tests. Must land atomically with 012/013 deployment ordering.
 5. **B5 scheduling/forecast:** `campaign-schedule.ts`, route, `workload-forecast.ts`, route, preparation/parity tests. All reads and persistence change together.

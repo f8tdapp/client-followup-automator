@@ -1,9 +1,9 @@
-import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
+import { getWorkspaceRuntimeContext } from "../../../lib/workspace-runtime-context.ts";
 import {
   DEFAULT_NEW_CONTACTS_PER_DAY,
   DEFAULT_TOTAL_DAILY_LIMIT,
   normalizeDailyLimit,
-} from "@/lib/schedule-policy";
+} from "../../../lib/schedule-policy.ts";
 
 type CampaignInput = {
   id?: unknown;
@@ -15,7 +15,14 @@ type CampaignInput = {
 };
 
 export async function POST(request: Request) {
-  const authorization = await getWorkspaceRuntimeContext();
+  return handleCampaignPost(request);
+}
+
+export async function handleCampaignPost(
+  request: Request,
+  authorize: typeof getWorkspaceRuntimeContext = getWorkspaceRuntimeContext,
+) {
+  const authorization = await authorize();
   if (!authorization.ok) return authorization.response;
   let input: CampaignInput;
 
@@ -54,15 +61,16 @@ export async function POST(request: Request) {
     updated_at: new Date().toISOString(),
   };
   const id = typeof input.id === "string" && input.id.trim() ? input.id.trim() : null;
-  const { supabaseAdmin } = authorization.context;
+  const { supabaseAdmin, workspaceId } = authorization.context;
   const query = id
     ? supabaseAdmin
         .from("campaigns")
         .update(payload)
         .eq("id", id)
+        .eq("workspace_id", workspaceId)
         .select("*")
         .single()
-    : supabaseAdmin.from("campaigns").insert(payload).select("*").single();
+    : supabaseAdmin.from("campaigns").insert({ ...payload, workspace_id: workspaceId }).select("*").single();
   const { data, error } = await query;
 
   if (error) {

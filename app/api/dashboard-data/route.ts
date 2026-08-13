@@ -1,4 +1,4 @@
-import { getWorkspaceRuntimeContext } from "@/lib/workspace-runtime-context";
+import { getWorkspaceRuntimeContext } from "../../../lib/workspace-runtime-context.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -16,26 +16,35 @@ type DashboardMutation = {
 };
 
 export async function GET(request: Request) {
-  const authorization = await getWorkspaceRuntimeContext();
+  return handleDashboardGet(request);
+}
+
+export async function handleDashboardGet(
+  request: Request,
+  authorize: typeof getWorkspaceRuntimeContext = getWorkspaceRuntimeContext,
+) {
+  const authorization = await authorize();
   if (!authorization.ok) return authorization.response;
 
   const url = new URL(request.url);
   const resource = url.searchParams.get("resource");
+  const { workspaceId } = authorization.context;
   const supabase = authorization.context.supabaseAdmin;
 
   if (resource === "clients") {
     const { data, error } = await supabase
       .from("clients")
       .select("*")
+      .eq("workspace_id", workspaceId)
       .order("created_at", { ascending: false });
     return databaseResponse("clients", data, error);
   }
 
   if (resource === "campaign-config") {
     const [campaigns, templates, steps] = await Promise.all([
-      supabase.from("campaigns").select("*").order("created_at", { ascending: false }),
-      supabase.from("email_templates").select("*").order("created_at", { ascending: false }),
-      supabase.from("campaign_steps").select("*").order("step_number", { ascending: true }),
+      supabase.from("campaigns").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }),
+      supabase.from("email_templates").select("*").eq("workspace_id", workspaceId).order("created_at", { ascending: false }),
+      supabase.from("campaign_steps").select("*").eq("workspace_id", workspaceId).order("step_number", { ascending: true }),
     ]);
     const error = campaigns.error ?? templates.error ?? steps.error;
     if (error) return databaseResponse("campaign configuration", null, error);
@@ -52,6 +61,7 @@ export async function GET(request: Request) {
     const { data, error } = await supabase
       .from("client_events")
       .select("*")
+      .eq("workspace_id", workspaceId)
       .eq("client_id", clientId)
       .order("created_at", { ascending: false })
       .limit(20);
@@ -62,7 +72,14 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const authorization = await getWorkspaceRuntimeContext();
+  return handleDashboardPost(request);
+}
+
+export async function handleDashboardPost(
+  request: Request,
+  authorize: typeof getWorkspaceRuntimeContext = getWorkspaceRuntimeContext,
+) {
+  const authorization = await authorize();
   if (!authorization.ok) return authorization.response;
 
   let input: DashboardMutation;
@@ -72,23 +89,39 @@ export async function POST(request: Request) {
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
+  const { workspaceId } = authorization.context;
   const supabase = authorization.context.supabaseAdmin;
   const action = typeof input.action === "string" ? input.action : "";
 
-  if (action === "create_client") {
+  if (action === "create_client" || action === "update_client") {
     const client = record(input.client);
     const email = string(client.email);
     if (!email) return Response.json({ error: "Email is required." }, { status: 400 });
-    const { data, error } = await supabase
-      .from("clients")
-      .insert(clientPayload(client))
-      .select("id")
-      .single();
+    const clientId = string(client.id);
+    if (action === "update_client" && !clientId) {
+      return Response.json({ error: "Client ID is required." }, { status: 400 });
+    }
+    const clients = supabase.from("clients");
+    const query = action === "update_client"
+      ? clients
+          .update(clientPayload(client))
+          .eq("id", clientId)
+          .eq("workspace_id", workspaceId)
+          .select("id")
+          .single()
+      : clients
+          .insert({ ...clientPayload(client), workspace_id: workspaceId })
+          .select("id")
+          .single();
+    const { data, error } = await query;
     if (error) return databaseResponse("client", null, error);
     const { error: eventError } = await supabase.from("client_events").insert({
+      workspace_id: workspaceId,
       client_id: data.id,
-      event_type: "manual_add",
-      details: "Contact manually added as a backup option.",
+      event_type: action === "update_client" ? "manual_update" : "manual_add",
+      details: action === "update_client"
+        ? "Contact details manually updated."
+        : "Contact manually added as a backup option.",
     });
     if (eventError) return databaseResponse("client event", null, eventError);
     return Response.json({ id: data.id });
@@ -96,7 +129,10 @@ export async function POST(request: Request) {
 
   if (action === "import_clients") {
     const clients = Array.isArray(input.clients)
-      ? input.clients.map(record).map(clientPayload)
+      ? input.clients.map(record).map((client) => ({
+          ...clientPayload(client),
+          workspace_id: workspaceId,
+        }))
       : [];
     if (clients.length === 0) return Response.json({ inserted: [] });
     if (clients.length > 2000 || clients.some((client) => !string(client.email))) {
@@ -105,7 +141,7 @@ export async function POST(request: Request) {
     const { data, error } = await supabase.from("clients").insert(clients).select("id,email");
     if (error) return databaseResponse("clients", null, error);
     const details = string(input.eventDetails) || "Imported from CSV.";
-    const events = (data ?? []).map((client) => ({ client_id: client.id, event_type: "csv_import", details }));
+    const events = (data ?? []).map((client) => ({ workspace_id: workspaceId, client_id: client.id, event_type: "csv_import", details }));
     if (events.length) {
       const { error: eventError } = await supabase.from("client_events").insert(events);
       if (eventError) return databaseResponse("client events", null, eventError);
@@ -121,8 +157,8 @@ export async function POST(request: Request) {
       return Response.json({ error: "Invalid campaign status." }, { status: 400 });
     }
     const query = action === "delete_campaign"
-      ? supabase.from("campaigns").delete().eq("id", campaignId)
-      : supabase.from("campaigns").update({ status, updated_at: new Date().toISOString() }).eq("id", campaignId);
+      ? supabase.from("campaigns").delete().eq("id", campaignId).eq("workspace_id", workspaceId)
+      : supabase.from("campaigns").update({ status, updated_at: new Date().toISOString() }).eq("id", campaignId).eq("workspace_id", workspaceId);
     const { error } = await query;
     return error ? databaseResponse("campaign", null, error) : Response.json({ ok: true });
   }
@@ -133,6 +169,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "Campaign and template name are required." }, { status: 400 });
     }
     const { error } = await supabase.from("email_templates").insert({
+      workspace_id: workspaceId,
       campaign_id: string(template.campaign_id),
       name: string(template.name),
       subject: string(template.subject),
@@ -148,7 +185,7 @@ export async function POST(request: Request) {
       subject_template: string(input.subject),
       body_template: string(input.body),
       updated_at: new Date().toISOString(),
-    }).eq("id", stepId);
+    }).eq("id", stepId).eq("workspace_id", workspaceId);
     return error ? databaseResponse("campaign step", null, error) : Response.json({ ok: true });
   }
 
