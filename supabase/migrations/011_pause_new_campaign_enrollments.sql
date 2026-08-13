@@ -169,6 +169,8 @@ owner to postgres;
 -- PipelineCue is a single-account application. All application data access now
 -- crosses the owner-authorized Next.js server boundary; browser roles have no
 -- direct table privileges. This is not a multi-tenant ownership policy.
+alter table public.clients enable row level security;
+
 revoke usage on schema public from anon, authenticated;
 grant usage on schema public to service_role;
 
@@ -211,6 +213,7 @@ grant all privileges on table
   public.sending_settings
 to service_role;
 
+drop policy if exists "Allow all access for now" on public.clients;
 drop policy if exists "Development anon full access campaigns" on public.campaigns;
 drop policy if exists "Development authenticated full access campaigns" on public.campaigns;
 drop policy if exists "PipelineCue anon read campaigns" on public.campaigns;
@@ -253,5 +256,15 @@ from public, anon, authenticated;
 
 grant execute on function public.enroll_eligible_campaign_contacts(uuid, integer, date)
 to service_role;
+
+-- Some older projects contain this catalog-management helper. Do not require
+-- it to exist, but ensure browser/public roles cannot execute it when it does.
+do $$
+begin
+  if pg_catalog.to_regprocedure('public.rls_auto_enable()') is not null then
+    execute 'revoke all on function public.rls_auto_enable() from public, anon, authenticated';
+  end if;
+end;
+$$;
 
 notify pgrst, 'reload schema';
