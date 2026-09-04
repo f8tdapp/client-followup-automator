@@ -16,12 +16,6 @@ type DailyScheduleRow = {
   status: string;
 };
 
-type EnrollmentRow = {
-  id: string;
-  contact_id: string;
-  campaign_id: string;
-};
-
 type HubSpotContactRow = {
   id: string;
   hubspot_contact_id: string | null;
@@ -230,6 +224,7 @@ export async function listTodayDrafts(date = getTodayDate()): Promise<EmailDraft
     "drafted",
     "reviewed",
     "skipped",
+    "manually_sent",
   ]);
   const scheduleIds = scheduledRows.map((row) => row.id);
   const drafts = await loadDraftsByScheduleIds(scheduleIds);
@@ -337,78 +332,40 @@ export async function markManuallySent({
     );
   }
 
-  const sentAt = new Date();
-  const sentAtIso = sentAt.toISOString();
-  const sentDate = sentAtIso.slice(0, 10);
-  const draft = await loadDraftById(draftId);
-
-  if (draft.status !== "approved") {
-    throw new EmailDraftOperationError(
-      "Only approved drafts can be marked manually sent.",
-      "email_drafts.mark_manually_sent.validate",
-    );
-  }
-
-  if (!draft.campaign_id || !draft.schedule_id || !draft.step_number) {
-    throw new EmailDraftOperationError(
-      "Draft is missing campaign progress details.",
-      "email_drafts.mark_manually_sent.validate",
-    );
-  }
-
-  const scheduleRow = await loadScheduleRowById(draft.schedule_id);
-  const enrollment = await loadEnrollmentForSchedule(scheduleRow);
-  const campaignSteps = await loadCampaignStepsForCampaign(draft.campaign_id);
-  const nextStep = campaignSteps.find(
-    (step) => step.step_number > (draft.step_number ?? 0),
-  );
-
-  const { error: draftError } = await runDraftQuery(
-    "email_drafts.mark_manually_sent",
+  const sentAtIso = new Date().toISOString();
+  const { data, error } = await runDraftQuery(
+    "email_drafts.mark_manually_sent_atomic",
     () =>
       getSupabaseAdmin()
-        .from("email_drafts")
-        .update({
-          status: "manually_sent",
-          manually_sent_at: sentAtIso,
-          manually_sent_note: note?.trim() || null,
-          updated_at: sentAtIso,
+        .rpc("mark_email_draft_manually_sent", {
+          requested_draft_id: draftId,
+          requested_sent_at: sentAtIso,
+          requested_note: note?.trim() || null,
         })
-        .eq("id", draft.id),
+        .returns<Array<{ result: "recorded" | "repaired" | "already_recorded" }>>(),
   );
 
-  if (draftError) {
-    throw createEmailDraftError("email_drafts.mark_manually_sent", draftError);
+  if (error) {
+    throw createEmailDraftError("email_drafts.mark_manually_sent_atomic", error);
   }
 
-  if (nextStep) {
-    const nextDueDate = addDays(sentDate, nextStep.delay_days ?? 0);
-
-    await updateEnrollmentProgress(enrollment.id, {
-      status: "active",
-      current_step: nextStep.step_number,
-      current_step_number: nextStep.step_number,
-      last_sent_step_number: draft.step_number,
-      last_sent_at: sentAtIso,
-      next_send_date: nextDueDate,
-      next_step_due_at: nextDueDate,
-      completed_at: null,
-      updated_at: sentAtIso,
-    });
-  } else {
-    await updateEnrollmentProgress(enrollment.id, {
-      status: "completed",
-      last_sent_step_number: draft.step_number,
-      last_sent_at: sentAtIso,
-      completed_at: sentAtIso,
-      updated_at: sentAtIso,
-    });
+  const result = Array.isArray(data) && data.length === 1 ? data[0]?.result : undefined;
+  if (
+    !result ||
+    !["recorded", "repaired", "already_recorded"].includes(result)
+  ) {
+    throw new EmailDraftOperationError(
+      "Atomic manual-send operation returned no recognized result.",
+      "email_drafts.mark_manually_sent_atomic",
+    );
   }
 
   return {
     ...(await listTodayDrafts()),
     message:
-      "Manual send recorded. Campaign progress was updated. Nothing was sent by the app.",
+      result === "already_recorded"
+        ? "Manual send was already recorded. Nothing was sent by the app."
+        : "Manual send recorded. Campaign progress was updated. Nothing was sent by the app.",
   };
 }
 
@@ -479,133 +436,6 @@ async function loadTodayScheduledRows(
   });
 
   return data ?? [];
-}
-
-async function loadDraftById(draftId: string) {
-  const { data, error } = await runDraftQuery("email_drafts.select_one", () =>
-    getSupabaseAdmin()
-      .from("email_drafts")
-      .select(
-        "id,schedule_id,hubspot_contact_id,contact_email,contact_first_name,contact_last_name,contact_company,campaign_id,campaign_step_id,step_number,subject,body,status,approved_at,skipped_at,manually_sent_at,manually_sent_note,created_at,updated_at",
-      )
-      .eq("id", draftId)
-      .limit(1)
-      .returns<EmailDraftRow[]>(),
-  );
-
-  if (error) {
-    throw createEmailDraftError("email_drafts.select_one", error);
-  }
-
-  const draft = data?.[0];
-
-  if (!draft) {
-    throw new EmailDraftOperationError(
-      "Draft was not found.",
-      "email_drafts.select_one",
-    );
-  }
-
-  return draft;
-}
-
-async function loadScheduleRowById(scheduleId: string) {
-  const { data, error } = await runDraftQuery("daily_send_schedule.select_one", () =>
-    getSupabaseAdmin()
-      .from("daily_send_schedule")
-      .select("id,contact_id,campaign_id,campaign_step_id,scheduled_date,status")
-      .eq("id", scheduleId)
-      .limit(1)
-      .returns<DailyScheduleRow[]>(),
-  );
-
-  if (error) {
-    throw createEmailDraftError("daily_send_schedule.select_one", error);
-  }
-
-  const scheduleRow = data?.[0];
-
-  if (!scheduleRow) {
-    throw new EmailDraftOperationError(
-      "Scheduled contact row was not found.",
-      "daily_send_schedule.select_one",
-    );
-  }
-
-  return scheduleRow;
-}
-
-async function loadEnrollmentForSchedule(scheduleRow: DailyScheduleRow) {
-  const { data, error } = await runDraftQuery(
-    "contact_campaign_enrollments.select_for_manual_send",
-    () =>
-      getSupabaseAdmin()
-        .from("contact_campaign_enrollments")
-        .select("id,contact_id,campaign_id")
-        .eq("contact_id", scheduleRow.contact_id)
-        .eq("campaign_id", scheduleRow.campaign_id)
-        .limit(1)
-        .returns<EnrollmentRow[]>(),
-  );
-
-  if (error) {
-    throw createEmailDraftError(
-      "contact_campaign_enrollments.select_for_manual_send",
-      error,
-    );
-  }
-
-  const enrollment = data?.[0];
-
-  if (!enrollment) {
-    throw new EmailDraftOperationError(
-      "Campaign enrollment was not found.",
-      "contact_campaign_enrollments.select_for_manual_send",
-    );
-  }
-
-  return enrollment;
-}
-
-async function loadCampaignStepsForCampaign(campaignId: string) {
-  const { data, error } = await runDraftQuery(
-    "campaign_steps.select_for_manual_send",
-    () =>
-      getSupabaseAdmin()
-        .from("campaign_steps")
-        .select("id,campaign_id,step_number,delay_days,subject_template,body_template")
-        .eq("campaign_id", campaignId)
-        .eq("status", "active")
-        .order("step_number", { ascending: true })
-        .returns<CampaignStepRow[]>(),
-  );
-
-  if (error) {
-    throw createEmailDraftError("campaign_steps.select_for_manual_send", error);
-  }
-
-  return data ?? [];
-}
-
-async function updateEnrollmentProgress(
-  enrollmentId: string,
-  values: Record<string, string | number | null>,
-) {
-  const { error } = await runDraftQuery(
-    "contact_campaign_enrollments.update_manual_progress",
-    () =>
-      getSupabaseAdmin()
-        .from("contact_campaign_enrollments")
-        .update(values)
-        .eq("id", enrollmentId),
-  );
-
-  if (error) {
-    throw createEmailDraftError(
-      "contact_campaign_enrollments.update_manual_progress",
-      error,
-    );
-  }
 }
 
 async function loadDraftsByScheduleIds(scheduleIds: string[]) {
@@ -773,13 +603,6 @@ function formatSupabaseError(error: SupabaseErrorLike) {
 
 function getTodayDate() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function addDays(date: string, days: number) {
-  const parsedDate = new Date(`${date}T00:00:00.000Z`);
-  parsedDate.setUTCDate(parsedDate.getUTCDate() + days);
-
-  return parsedDate.toISOString().slice(0, 10);
 }
 
 function unique(values: string[]) {

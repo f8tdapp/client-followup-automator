@@ -18,6 +18,10 @@ import {
   persistScheduleOutcomes,
   runTwoPhaseGeneration,
 } from "@/lib/schedule-policy";
+import {
+  excludePreviouslyManuallySentEnrollments,
+  getManualSendProgressionKey,
+} from "@/lib/manual-send-safety";
 
 type CampaignRow = {
   id: string;
@@ -206,7 +210,7 @@ export type DailySendPlan = {
   schedule: DailySendPlanRow[];
 } & DailySendPlanDiagnostics;
 
-const scheduleStatuses = ["scheduled", "skipped"];
+const scheduleStatuses = ["scheduled", "skipped", "manually_sent"];
 const terminalSuppressionStatuses = new Set([
   "replied",
   "reply",
@@ -374,10 +378,19 @@ async function prepareDailyGeneration(
         .filter((step) => step.campaign_id === campaign.id)
         .map((step) => step.step_number),
     ];
-    const enrollments = await getDueEnrollments(
+    const dueEnrollments = await getDueEnrollments(
       campaign.id,
       date,
       Math.max(...stepNumbers, 3),
+    );
+    const manuallySentProgressions = await getManuallySentProgressions(
+      campaign.id,
+      dueEnrollments.map((enrollment) => enrollment.contact_id),
+    );
+    const enrollments = excludePreviouslyManuallySentEnrollments(
+      dueEnrollments,
+      preparedSteps.existingSteps,
+      manuallySentProgressions,
     );
     const contactIds = enrollments.map((enrollment) => enrollment.contact_id);
     const [contacts, suppressionRules] = await Promise.all([
@@ -1736,6 +1749,92 @@ async function getDueEnrollments(
   });
 
   return data;
+}
+
+async function getManuallySentProgressions(
+  campaignId: string,
+  contactIds: string[],
+) {
+  const uniqueContactIds = Array.from(new Set(contactIds));
+  const progressionKeys = new Set<string>();
+
+  if (uniqueContactIds.length === 0) return progressionKeys;
+
+  const supabaseAdmin = getSupabaseAdmin();
+
+  for (const contactChunk of chunkArray(uniqueContactIds, contactLookupChunkSize)) {
+    const schedules = await loadAllDeterministicPages(async (from, to) => {
+      const { data, error } = await runScheduleQuery(
+        "generate_today.load_manual_send_schedules",
+        () =>
+          supabaseAdmin
+            .from("daily_send_schedule")
+            .select("id,contact_id,campaign_id,campaign_step_id")
+            .eq("campaign_id", campaignId)
+            .in("contact_id", contactChunk)
+            .order("id", { ascending: true })
+            .range(from, to)
+            .returns<
+              Array<{
+                id: string;
+                contact_id: string;
+                campaign_id: string;
+                campaign_step_id: string;
+              }>
+            >(),
+      );
+
+      if (error) {
+        throw createCampaignScheduleOperationError(
+          "Manual-send schedule history load failed",
+          "generate_today.load_manual_send_schedules",
+          error,
+        );
+      }
+
+      return data ?? [];
+    }, dueEnrollmentPageSize);
+
+    const schedulesById = new Map(schedules.map((schedule) => [schedule.id, schedule]));
+
+    for (const scheduleIdChunk of chunkArray(
+      Array.from(schedulesById.keys()),
+      contactLookupChunkSize,
+    )) {
+      const { data, error } = await runScheduleQuery(
+        "generate_today.load_manually_sent_drafts",
+        () =>
+          supabaseAdmin
+            .from("email_drafts")
+            .select("schedule_id")
+            .eq("status", "manually_sent")
+            .in("schedule_id", scheduleIdChunk)
+            .returns<Array<{ schedule_id: string }>>(),
+      );
+
+      if (error) {
+        throw createCampaignScheduleOperationError(
+          "Manual-send draft history load failed",
+          "generate_today.load_manually_sent_drafts",
+          error,
+        );
+      }
+
+      for (const draft of data ?? []) {
+        const schedule = schedulesById.get(draft.schedule_id);
+        if (!schedule) continue;
+        progressionKeys.add(
+          getManualSendProgressionKey(
+            schedule.contact_id,
+            schedule.campaign_id,
+            schedule.campaign_step_id,
+          ),
+        );
+      }
+    }
+  }
+
+  return progressionKeys;
 }
 
 async function getContactsById(contactIds: string[]) {
