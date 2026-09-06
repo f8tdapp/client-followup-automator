@@ -2843,7 +2843,7 @@ export default function Dashboard() {
   }
 
   return (
-    <main className="min-h-screen bg-[#dfe8f3] text-slate-950">
+    <main className="min-h-screen bg-[#cbd8e8] text-slate-950">
       <div className="mx-auto flex max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
         <aside className="flex w-full min-w-0 shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
           <div>
@@ -3085,7 +3085,7 @@ export default function Dashboard() {
         )}
 
         <section
-          className="scroll-mt-5 rounded-2xl border border-cyan-100 bg-white p-4 shadow-[0_14px_42px_rgba(15,23,42,0.08)]"
+          className="scroll-mt-5 rounded-2xl border border-cyan-200 bg-white p-4 shadow-[0_16px_46px_rgba(15,23,42,0.12)]"
           ref={heroRef}
         >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -3135,13 +3135,13 @@ export default function Dashboard() {
         </section>
 
         <details
-          className="group rounded-2xl border border-slate-200 bg-white shadow-[0_14px_42px_rgba(15,23,42,0.07)]"
+          className="group rounded-2xl border border-slate-300 bg-slate-100 shadow-[0_16px_46px_rgba(15,23,42,0.11)]"
           open={activeView === "send-plan" ? true : undefined}
         >
           <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-4 font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5">
             <span>
               Planning and campaign details
-              <span className="mt-1 block text-sm font-normal text-slate-500">
+              <span className="mt-1 block text-sm font-normal text-slate-600">
                 Contact totals, enrollment controls, safeguards, and forecasts.
               </span>
             </span>
@@ -3856,7 +3856,7 @@ export default function Dashboard() {
         </details>
 
         <section
-          className="scroll-mt-5 rounded-2xl border border-blue-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]"
+          className="scroll-mt-5 rounded-2xl border border-blue-200 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.13)]"
           ref={draftReviewRef}
         >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
