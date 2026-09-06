@@ -11,6 +11,8 @@ const providerComposeUrls: Record<Exclude<EmailProvider, "other">, string> = {
   outlook: "https://outlook.office.com/mail/deeplink/compose",
 };
 
+const pipelineCueGmailAccount = "tj@listingmediact.com";
+
 export function getEmailComposeUrl(
   provider: Exclude<EmailProvider, "other">,
   draft: EmailComposeDraft,
@@ -18,6 +20,7 @@ export function getEmailComposeUrl(
   const url = new URL(providerComposeUrls[provider]);
 
   if (provider === "gmail") {
+    url.searchParams.set("authuser", pipelineCueGmailAccount);
     url.searchParams.set("view", "cm");
     url.searchParams.set("fs", "1");
     url.searchParams.set("to", draft.contact_email.trim());
