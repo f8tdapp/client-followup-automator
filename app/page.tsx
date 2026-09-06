@@ -14,6 +14,10 @@ import {
   getEmailComposeUrl,
   getFullEmailText,
 } from "@/lib/email-compose";
+import {
+  getCompletedDaySummary,
+  partitionHomeDrafts,
+} from "@/lib/home-workflow";
 import { createDashboardAuthBoundary } from "@/lib/dashboard-auth-boundary";
 import {
   beginForecastRequest,
@@ -227,11 +231,6 @@ type CampaignStep = {
 };
 
 type EmailDraftStatus = "draft" | "approved" | "skipped" | "manually_sent";
-type EmailDraftFilter =
-  | "needs_review"
-  | "approved"
-  | "skipped"
-  | "all";
 
 type EmailDraft = {
   id: string;
@@ -508,12 +507,6 @@ const emptySendingSettingsForm: SendingSettingsForm = {
   domain_verified: false,
 };
 
-const draftFilters: Array<{ label: string; value: EmailDraftFilter }> = [
-  { label: "Needs Review", value: "needs_review" },
-  { label: "Approved", value: "approved" },
-  { label: "Skipped", value: "skipped" },
-  { label: "All", value: "all" },
-];
 
 const campaignStatuses = [
   { label: "Draft", value: "draft" },
@@ -901,22 +894,6 @@ function getDraftStatusLabel(status: EmailDraftStatus) {
   return "Needs Review";
 }
 
-function getDraftFilterEmptyMessage(filter: EmailDraftFilter) {
-  if (filter === "needs_review") {
-    return "No drafts need review right now. Check Approved or Skipped to see completed items.";
-  }
-
-  if (filter === "approved") {
-    return "No drafts approved yet.";
-  }
-
-  if (filter === "skipped") {
-    return "No drafts skipped today.";
-  }
-
-  return "No drafts generated yet. Click Generate Today's Drafts.";
-}
-
 function getDraftStatusClasses(status: EmailDraftStatus) {
   if (status === "manually_sent") {
     return "border-indigo-200 bg-indigo-50 text-indigo-800";
@@ -1143,8 +1120,7 @@ export default function Dashboard() {
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
   const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
-  const [draftFilter, setDraftFilter] =
-    useState<EmailDraftFilter>("needs_review");
+  const [showCompletedMessages, setShowCompletedMessages] = useState(false);
   const [importSummary, setImportSummary] =
     useState<ImportSummary>(emptyImportSummary);
   const [openPanel, setOpenPanel] = useState<
@@ -1455,79 +1431,27 @@ export default function Dashboard() {
                         "PipelineCue will surface the next follow-ups when they become due.",
                       progressStep: "complete",
                     };
-  const workflowSteps = [
-    {
-      label: "HubSpot synced",
-      state: hubSpotIsConnected && healthMetrics.totalContacts > 0
-        ? "Complete"
-        : recommendedNextStep.progressStep === "hubspot"
-          ? "Current"
-          : "Pending",
-    },
-    {
-      label: "Send plan",
-      state: todayWorkflowCount > 0
-        ? "Complete"
-        : recommendedNextStep.progressStep === "plan"
-          ? "Current"
-          : "Pending",
-    },
-    {
-      label: "Drafts",
-      state: emailDraftSummary.totalDrafts > 0
-        ? "Complete"
-        : recommendedNextStep.progressStep === "drafts"
-          ? "Current"
-          : "Pending",
-    },
-    {
-      label: "Review",
-      state: emailDraftSummary.totalDrafts > 0 && draftStatusCounts.needsReview === 0
-        ? "Complete"
-        : recommendedNextStep.progressStep === "review"
-          ? "Current"
-          : "Pending",
-    },
-    {
-      label: "Manually sent",
-      state:
-        emailDraftSummary.totalDrafts > 0 &&
-        (draftStatusCounts.manuallySent > 0 ||
-          draftStatusCounts.skipped + draftStatusCounts.manuallySent ===
-            emailDraftSummary.totalDrafts)
-          ? "Complete"
-          : recommendedNextStep.progressStep === "sent"
-            ? "Current"
-            : "Pending",
-    },
-  ];
   const recommendationIsBusy =
     (recommendedNextStep.actionLabel === "Sync HubSpot" && isSyncingHubSpot) ||
     (recommendedNextStep.actionLabel === "Create starter campaign" &&
       isCreatingStarterCampaign) ||
     (recommendedNextStep.actionLabel === "Enroll contacts" &&
       isEnrollingContacts);
-  const activeDraftFilter =
-    draftStatusCounts.needsReview > 0 || draftFilter !== "needs_review"
-      ? draftFilter
-      : "all";
-  const draftFilterCounts: Record<EmailDraftFilter, number> = {
-    needs_review: draftStatusCounts.needsReview,
-    approved: draftStatusCounts.approved,
-    skipped: draftStatusCounts.skipped,
-    all: draftStatusCounts.total,
-  };
-  const filteredDrafts = dailyDrafts.filter((draft) => {
-    if (activeDraftFilter === "all") {
-      return true;
-    }
-
-    if (activeDraftFilter === "needs_review") {
-      return draft.status === "draft";
-    }
-
-    return draft.status === activeDraftFilter;
-  });
+  const { actionable: actionableDrafts, completed: completedDrafts } =
+    partitionHomeDrafts(dailyDrafts);
+  const visibleDrafts = showCompletedMessages
+    ? [...actionableDrafts, ...completedDrafts]
+    : actionableDrafts;
+  const todayIsComplete =
+    dailyDrafts.length > 0 && actionableDrafts.length === 0;
+  const completedDaySummary = getCompletedDaySummary(dailyDrafts);
+  const homeNextAction: RecommendedNextStep = todayIsComplete
+    ? {
+        title: "Today complete",
+        reason: completedDaySummary,
+        progressStep: "complete",
+      }
+    : recommendedNextStep;
   const scheduleEmptyReason =
     dailySendPlan.summary.totalScheduled === 0 && emailDraftSummary.totalDrafts > 0
       ? "Today's send plan has already been generated. Continue reviewing drafts below."
@@ -2920,8 +2844,8 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-[#dfe8f3] text-slate-950">
-      <div className="mx-auto flex w-full max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
-        <aside className="flex shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
+      <div className="mx-auto flex max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
+        <aside className="flex w-full min-w-0 shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-xl bg-emerald-400 text-base font-bold text-[#071b33]">
@@ -3094,6 +3018,7 @@ export default function Dashboard() {
 
         {(activeView === "home" || activeView === "send-plan") && (
         <>
+        {activeView === "send-plan" && (
         <section
           className="scroll-mt-5 overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(135deg,#071b33_0%,#0b2a52_48%,#0f766e_100%)] p-4 text-white shadow-[0_14px_42px_rgba(7,27,51,0.22)]"
           ref={heroRef}
@@ -3157,51 +3082,72 @@ export default function Dashboard() {
             </div>
           )}
         </section>
+        )}
 
-        <section className="rounded-2xl border border-cyan-100 bg-white p-4 shadow-[0_14px_42px_rgba(15,23,42,0.08)]">
+        <section
+          className="scroll-mt-5 rounded-2xl border border-cyan-100 bg-white p-4 shadow-[0_14px_42px_rgba(15,23,42,0.08)]"
+          ref={heroRef}
+        >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
               <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
                 Next Action
               </p>
               <h2 className="mt-1 text-lg font-semibold text-slate-950">
-                {recommendedNextStep.title}
+                {homeNextAction.title}
               </h2>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                {recommendedNextStep.reason}
+                {homeNextAction.reason}
               </p>
             </div>
-            {recommendedNextStep.action && recommendedNextStep.actionLabel && (
+            {homeNextAction.action && homeNextAction.actionLabel && (
               <button
-                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={recommendationIsBusy}
-                onClick={() => void recommendedNextStep.action?.()}
+                onClick={() => void homeNextAction.action?.()}
                 type="button"
               >
-                {recommendationIsBusy ? "Working..." : recommendedNextStep.actionLabel}
+                {recommendationIsBusy ? "Working..." : homeNextAction.actionLabel}
               </button>
             )}
           </div>
 
-          <div className="mt-4 flex flex-wrap gap-2">
-            {workflowSteps.map((step) => (
-              <div
-                className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-bold ${
-                  step.state === "Complete"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : step.state === "Current"
-                      ? "border-cyan-300 bg-cyan-50 text-cyan-800"
-                      : "border-slate-200 bg-slate-50 text-slate-500"
-                }`}
-                key={step.label}
+          <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-slate-600">
+              <span className="font-semibold text-slate-900">Today&apos;s progress:</span>{" "}
+              {draftStatusCounts.needsReview} to review, {draftStatusCounts.approved} ready to send, {draftStatusCounts.manuallySent} sent, {draftStatusCounts.skipped} suppressed.
+            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span>
+                HubSpot {getHubSpotStatusLabel(hubSpotStatus.status).toLowerCase()}
+                {hubSpotStatus.lastSyncAt ? ` - Last sync ${formatDateTime(hubSpotStatus.lastSyncAt)}` : " - Last sync unavailable"}
+              </span>
+              <button
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 transition hover:border-cyan-500 hover:text-cyan-800 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:text-slate-400"
+                disabled={isSyncingHubSpot}
+                onClick={handleHubSpotSync}
+                type="button"
               >
-                <span>{step.label}</span>
-                <span className="font-semibold">{step.state}</span>
-              </div>
-            ))}
+                {isSyncingHubSpot ? "Syncing..." : "Sync HubSpot"}
+              </button>
+            </div>
           </div>
         </section>
 
+        <details
+          className="group rounded-2xl border border-slate-200 bg-white shadow-[0_14px_42px_rgba(15,23,42,0.07)]"
+          open={activeView === "send-plan" ? true : undefined}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-4 font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5">
+            <span>
+              Planning and campaign details
+              <span className="mt-1 block text-sm font-normal text-slate-500">
+                Contact totals, enrollment controls, safeguards, and forecasts.
+              </span>
+            </span>
+            <span aria-hidden="true" className="text-cyan-700 transition group-open:rotate-180">v</span>
+          </summary>
+          <div className="grid gap-4 border-t border-slate-100 p-3 sm:p-4">
         <section className="rounded-2xl border border-white bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.10)]">
           <div className="mb-4">
             <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
@@ -3906,6 +3852,8 @@ export default function Dashboard() {
           </>
           )}
         </section>
+          </div>
+        </details>
 
         <section
           className="scroll-mt-5 rounded-2xl border border-blue-100 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.09)]"
@@ -3960,64 +3908,28 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-xl border border-cyan-100 bg-cyan-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
-                Drafts generated
-              </p>
-              <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {emailDraftSummary.totalDrafts}
-              </p>
-            </div>
-            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                Approved
-              </p>
-              <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {emailDraftSummary.approved}
-              </p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-                Skipped
-              </p>
-              <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {emailDraftSummary.skippedDrafts}
-              </p>
-            </div>
-            <div className="rounded-xl border border-amber-100 bg-amber-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
-                Remaining
-              </p>
-              <p className="mt-2 text-2xl font-semibold text-slate-950">
-                {emailDraftSummary.remaining}
-              </p>
-            </div>
-          </div>
-
           {dailyDrafts.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {draftFilters.map((filter) => (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+              <p className="text-sm font-medium text-slate-600">
+                Showing {actionableDrafts.length} message{actionableDrafts.length === 1 ? "" : "s"} that need action.
+              </p>
+              {completedDrafts.length > 0 && (
                 <button
-                  className={`h-8 rounded-lg border px-3 text-xs font-bold transition ${
-                    activeDraftFilter === filter.value
-                      ? "border-cyan-600 bg-cyan-50 text-cyan-800"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-cyan-300 hover:text-cyan-700"
-                  }`}
-                  key={filter.value}
-                  onClick={() => setDraftFilter(filter.value)}
+                  aria-expanded={showCompletedMessages}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-cyan-500 hover:text-cyan-800 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2"
+                  onClick={() => setShowCompletedMessages((current) => !current)}
                   type="button"
                 >
-                  {filter.label} ({draftFilterCounts[filter.value]})
+                  {showCompletedMessages ? "Hide completed messages" : `View completed messages (${completedDrafts.length})`}
                 </button>
-              ))}
+              )}
             </div>
           )}
 
           <div className="mt-4 grid gap-3">
             {dailyDrafts.length > 0 ? (
-              filteredDrafts.length > 0 ? (
-              filteredDrafts.map((draft) => {
+              visibleDrafts.length > 0 ? (
+              visibleDrafts.map((draft) => {
                 const isEditing = editingDraftId === draft.id;
                 const isUpdating = updatingDraftId === draft.id;
 
@@ -4271,12 +4183,12 @@ export default function Dashboard() {
               })
               ) : (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
-                  {getDraftFilterEmptyMessage(activeDraftFilter)}
+                  Today complete. Use View completed messages to see today&apos;s sent and suppressed messages.
                 </div>
               )
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
-                {getDraftFilterEmptyMessage("all")} Nothing sends automatically.
+                No drafts have been prepared for today. Nothing sends automatically.
               </div>
             )}
           </div>
