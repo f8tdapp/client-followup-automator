@@ -1082,6 +1082,8 @@ export default function Dashboard() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isHubSpotWorkspaceLoading, setIsHubSpotWorkspaceLoading] =
+    useState(true);
   const [isSavingClient, setIsSavingClient] = useState(false);
   const [isSavingCampaign, setIsSavingCampaign] = useState(false);
   const [isSavingTemplate, setIsSavingTemplate] = useState(false);
@@ -1352,6 +1354,7 @@ export default function Dashboard() {
   const hubSpotIsConnected =
     hubSpotStatus.status === "connected" ||
     hubSpotStatus.status === "private_token";
+  const isInitialWorkspaceLoading = isLoading || isHubSpotWorkspaceLoading;
   const recommendedNextStep: RecommendedNextStep = !hubSpotIsConnected
     ? {
         title: "Connect HubSpot",
@@ -2117,6 +2120,9 @@ export default function Dashboard() {
         } catch (hubSpotError) {
           reportError("Unable to load HubSpot dashboard data", hubSpotError);
         }
+        if (isActive) {
+          setIsHubSpotWorkspaceLoading(false);
+        }
         await forecastRequest;
       })();
     }, 0);
@@ -2845,23 +2851,23 @@ export default function Dashboard() {
   return (
     <main className="min-h-screen bg-[#cbd8e8] text-slate-950">
       <div className="mx-auto flex max-w-[90rem] flex-col gap-4 p-3 sm:p-4 lg:flex-row lg:p-5">
-        <aside className="flex w-full min-w-0 shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
+        <aside className="flex w-full min-w-0 shrink-0 flex-col justify-between rounded-2xl bg-[#071b33] p-4 font-sans text-white shadow-[0_18px_52px_rgba(7,27,51,0.24)] lg:sticky lg:top-5 lg:h-[calc(100vh-2.5rem)] lg:w-60">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-xl bg-emerald-400 text-base font-bold text-[#071b33]">
                 PC
               </div>
               <div>
-                <p className="text-sm font-semibold text-white">
+                <p className="text-base font-semibold leading-5 text-white">
                   PipelineCue
                 </p>
-                <p className="mt-0.5 text-xs text-cyan-100/70">
+                <p className="mt-1 text-[13px] leading-5 text-cyan-50/80">
                   HubSpot-first daily follow-up assistant
                 </p>
               </div>
             </div>
 
-            <nav className="mt-6 grid gap-1.5 text-sm font-medium">
+            <nav className="mt-6 grid gap-1.5 text-[15px] font-semibold">
               {[
                 "Home",
                 "Today's Send Plan",
@@ -2880,6 +2886,7 @@ export default function Dashboard() {
 
                 return (
                 <button
+                  disabled={isInitialWorkspaceLoading && item !== "Home"}
                   className={`rounded-xl px-3 py-2 text-left transition ${
                     activeView === itemView
                       ? "bg-white text-[#071b33] shadow-sm hover:bg-cyan-50"
@@ -2896,6 +2903,7 @@ export default function Dashboard() {
               <button
                 aria-controls="advanced-navigation"
                 aria-expanded={showMoreActions}
+                disabled={isInitialWorkspaceLoading}
                 className={`flex items-center justify-between rounded-xl px-3 py-2 text-left transition ${
                   activeView === "advanced"
                     ? "bg-white/15 text-white"
@@ -2980,7 +2988,7 @@ export default function Dashboard() {
                 Back to top
               </button>
             )}
-            <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-xs leading-5 text-cyan-50">
+            <div className="rounded-xl border border-white/10 bg-white/10 p-3 text-sm leading-6 text-cyan-50">
               <p className="font-semibold text-white">Tip</p>
               <p className="mt-1 text-cyan-50/80">
                 Check Next Action when you want the next useful step.
@@ -2990,17 +2998,17 @@ export default function Dashboard() {
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col gap-4">
-        <header className="flex flex-col justify-between gap-3 border-b border-slate-300/70 pb-4 lg:flex-row lg:items-end">
+        <header className="flex flex-col justify-between gap-3 border-b border-slate-300/70 pb-4 font-sans lg:flex-row lg:items-end">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-950">
+            <h1 className="text-[32px] font-bold leading-tight tracking-tight text-slate-950">
               PipelineCue
             </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+            <p className="mt-2 max-w-2xl text-base leading-7 text-slate-700">
               HubSpot-first daily follow-up assistant
             </p>
           </div>
           <form action="/api/auth/logout" method="post">
-            <button className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Sign out</button>
+            <button className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-[15px] font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2">Sign out</button>
           </form>
         </header>
 
@@ -3018,7 +3026,7 @@ export default function Dashboard() {
 
         {(activeView === "home" || activeView === "send-plan") && (
         <>
-        {activeView === "send-plan" && (
+        {activeView === "send-plan" && !isInitialWorkspaceLoading && (
         <section
           className="scroll-mt-5 overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(135deg,#071b33_0%,#0b2a52_48%,#0f766e_100%)] p-4 text-white shadow-[0_14px_42px_rgba(7,27,51,0.22)]"
           ref={heroRef}
@@ -3085,24 +3093,38 @@ export default function Dashboard() {
         )}
 
         <section
-          className="scroll-mt-5 rounded-2xl border border-cyan-200 bg-white p-4 shadow-[0_16px_46px_rgba(15,23,42,0.12)]"
+          className="scroll-mt-5 rounded-2xl border border-cyan-200 bg-white p-4 font-sans shadow-[0_16px_46px_rgba(15,23,42,0.12)]"
           ref={heroRef}
         >
+          {isInitialWorkspaceLoading ? (
+            <div aria-live="polite" className="py-2">
+              <p className="text-[13px] font-medium uppercase tracking-[0.08em] text-cyan-700">
+                Workspace
+              </p>
+              <h2 className="mt-1 text-xl font-semibold leading-7 text-slate-950 sm:text-[22px]">
+                Loading your workspace…
+              </h2>
+              <p className="mt-2 text-base leading-7 text-slate-700">
+                Getting today&apos;s follow-ups ready.
+              </p>
+            </div>
+          ) : (
+          <>
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+              <p className="text-[13px] font-medium uppercase tracking-[0.08em] text-cyan-700">
                 Next Action
               </p>
-              <h2 className="mt-1 text-lg font-semibold text-slate-950">
+              <h2 className="mt-1 text-xl font-semibold leading-7 text-slate-950 sm:text-[22px]">
                 {homeNextAction.title}
               </h2>
-              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+              <p className={`mt-2 max-w-2xl text-base leading-7 ${todayIsComplete ? "font-medium text-slate-800" : "font-normal text-slate-700"}`}>
                 {homeNextAction.reason}
               </p>
             </div>
             {homeNextAction.action && homeNextAction.actionLabel && (
               <button
-                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-sm font-bold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={recommendationIsBusy}
                 onClick={() => void homeNextAction.action?.()}
                 type="button"
@@ -3113,11 +3135,11 @@ export default function Dashboard() {
           </div>
 
           <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-slate-600">
+            <p className="text-[15px] leading-6 text-slate-700">
               <span className="font-semibold text-slate-900">Today&apos;s progress:</span>{" "}
               {draftStatusCounts.needsReview} to review, {draftStatusCounts.approved} ready to send, {draftStatusCounts.manuallySent} sent, {draftStatusCounts.skipped} suppressed.
             </p>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <div className="flex flex-wrap items-center gap-2 text-[15px] leading-6 text-slate-600">
               <span>
                 HubSpot {getHubSpotStatusLabel(hubSpotStatus.status).toLowerCase()}
                 {hubSpotStatus.lastSyncAt ? ` - Last sync ${formatDateTime(hubSpotStatus.lastSyncAt)}` : " - Last sync unavailable"}
@@ -3132,16 +3154,20 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+          </>
+          )}
         </section>
 
+        {!isInitialWorkspaceLoading && (
+        <>
         <details
-          className="group rounded-2xl border border-slate-300 bg-slate-100 shadow-[0_16px_46px_rgba(15,23,42,0.11)]"
+          className="group rounded-2xl border border-slate-300 bg-slate-100 font-sans shadow-[0_16px_46px_rgba(15,23,42,0.11)]"
           open={activeView === "send-plan" ? true : undefined}
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-4 font-semibold text-slate-900 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-4 text-lg font-semibold leading-6 text-slate-900 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500 sm:p-5">
             <span>
               Planning and campaign details
-              <span className="mt-1 block text-sm font-normal text-slate-600">
+              <span className="mt-1 block text-[15px] font-normal leading-6 text-slate-700">
                 Contact totals, enrollment controls, safeguards, and forecasts.
               </span>
             </span>
@@ -3856,23 +3882,23 @@ export default function Dashboard() {
         </details>
 
         <section
-          className="scroll-mt-5 rounded-2xl border border-blue-200 bg-white p-5 shadow-[0_18px_52px_rgba(15,23,42,0.13)]"
+          className="scroll-mt-5 rounded-2xl border border-blue-200 bg-white p-5 font-sans shadow-[0_18px_52px_rgba(15,23,42,0.13)]"
           ref={draftReviewRef}
         >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <p className="text-sm font-medium uppercase tracking-wide text-cyan-700">
+              <p className="text-[13px] font-medium uppercase tracking-[0.08em] text-cyan-700">
                 Daily workspace
               </p>
-              <h2 className="mt-1 text-xl font-semibold text-slate-950">
+              <h2 className="mt-1 text-xl font-semibold leading-7 text-slate-950 sm:text-[22px]">
                 Today&apos;s Follow-Ups
               </h2>
-              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+              <p className="mt-2 max-w-2xl text-base leading-7 text-slate-700">
                 {emailDraftSummary.totalDrafts === 0
                   ? "Generate today's drafts to prepare your follow-ups. Nothing sends automatically."
                   : "Review, approve, or skip today's prepared follow-ups. Nothing sends automatically."}
               </p>
-              <p className="mt-1 max-w-2xl text-xs font-medium leading-5 text-slate-500">
+              <p className="mt-1 max-w-2xl text-[15px] font-normal leading-6 text-slate-600">
                 Use Mark Manually Sent after you send the email yourself from
                 listingmediact.com. This records progress only. PipelineCue
                 does not send anything.
@@ -3880,7 +3906,7 @@ export default function Dashboard() {
             </div>
             <div className="shrink-0 lg:max-w-xs lg:text-right">
               <button
-                className="h-10 cursor-pointer whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="h-10 cursor-pointer whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={isGeneratingDrafts || scheduledDraftContactCount === 0}
                 onClick={() => void handleGenerateDraftsPreview()}
                 type="button"
@@ -4193,6 +4219,8 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+        </>
+        )}
 
         </>
         )}
