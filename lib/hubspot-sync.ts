@@ -86,14 +86,27 @@ export async function getHubSpotConnectionStatus() {
 async function getPrivateTokenConnectionStatus() {
   try {
     const supabaseAdmin = getSupabaseAdmin();
-    const { count } = await supabaseAdmin
-      .from("hubspot_contacts")
-      .select("id", { count: "exact", head: true });
+    const [connectionResult, contactsResult] = await Promise.allSettled([
+      supabaseAdmin
+        .from("hubspot_connections")
+        .select("last_sync_at")
+        .eq("provider", provider)
+        .maybeSingle<Pick<HubSpotConnection, "last_sync_at">>(),
+      supabaseAdmin
+        .from("hubspot_contacts")
+        .select("id", { count: "exact", head: true }),
+    ]);
 
     return {
       status: "private_token",
-      lastSyncAt: null,
-      contactsSynced: count ?? 0,
+      lastSyncAt:
+        connectionResult.status === "fulfilled"
+          ? connectionResult.value.data?.last_sync_at ?? null
+          : null,
+      contactsSynced:
+        contactsResult.status === "fulfilled"
+          ? contactsResult.value.count ?? 0
+          : 0,
     };
   } catch {
     return {

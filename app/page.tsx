@@ -3141,8 +3141,8 @@ export default function Dashboard() {
             </p>
             <div className="flex flex-wrap items-center gap-2 text-[15px] leading-6 text-slate-600">
               <span>
-                HubSpot {getHubSpotStatusLabel(hubSpotStatus.status).toLowerCase()}
-                {hubSpotStatus.lastSyncAt ? ` - Last sync ${formatDateTime(hubSpotStatus.lastSyncAt)}` : " - Last sync unavailable"}
+                HubSpot {hubSpotIsConnected ? "connected" : getHubSpotStatusLabel(hubSpotStatus.status).toLowerCase()}
+                {hubSpotStatus.lastSyncAt ? ` - Last sync ${formatDateTime(hubSpotStatus.lastSyncAt)}` : ""}
               </span>
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 transition hover:border-cyan-500 hover:text-cyan-800 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:text-slate-400"
@@ -3904,10 +3904,11 @@ export default function Dashboard() {
                 does not send anything.
               </p>
             </div>
+            {scheduledDraftContactCount > 0 && (
             <div className="shrink-0 lg:max-w-xs lg:text-right">
               <button
                 className="h-10 cursor-pointer whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
-                disabled={isGeneratingDrafts || scheduledDraftContactCount === 0}
+                disabled={isGeneratingDrafts}
                 onClick={() => void handleGenerateDraftsPreview()}
                 type="button"
               >
@@ -3915,16 +3916,7 @@ export default function Dashboard() {
                   ? "Generating drafts..."
                   : "Generate today's drafts"}
               </button>
-              {scheduledDraftContactCount === 0 &&
-              emailDraftSummary.totalDrafts > 0 ? (
-                <p className="mt-2 text-xs font-medium text-slate-500">
-                  Drafts already generated for today.
-                </p>
-              ) : scheduledDraftContactCount === 0 ? (
-                <p className="mt-2 text-xs font-medium text-slate-500">
-                  Generate today&apos;s send plan first.
-                </p>
-              ) : emailDraftSummary.totalDrafts === 0 ? (
+              {emailDraftSummary.totalDrafts === 0 ? (
                 <p className="mt-2 max-w-xs text-xs font-medium leading-5 text-slate-500">
                   No drafts yet. Click Generate Today&apos;s Drafts to prepare
                   emails for today&apos;s scheduled contacts. Nothing sends
@@ -3932,6 +3924,7 @@ export default function Dashboard() {
                 </p>
               ) : null}
             </div>
+            )}
           </div>
 
           {dailyDrafts.length > 0 && (
