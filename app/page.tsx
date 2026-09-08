@@ -583,6 +583,20 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+async function readJsonResponse<T>(response: Response, fallback: string) {
+  const responseText = await response.text();
+
+  try {
+    return JSON.parse(responseText) as T;
+  } catch {
+    throw new Error(
+      response.status === 504
+        ? "Preparing today's follow-ups took too long. Refresh the page before trying again. Nothing was sent."
+        : fallback,
+    );
+  }
+}
+
 function isHeadersOverflowMessage(message: string) {
   const normalizedMessage = message.toLowerCase();
 
@@ -1704,9 +1718,9 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_today" }),
       });
-      const scheduleBody = (await scheduleResponse.json()) as DailySendPlan & {
+      const scheduleBody = await readJsonResponse<DailySendPlan & {
         error?: string;
-      };
+      }>(scheduleResponse, "Unable to read today's send plan response.");
 
       if (!scheduleResponse.ok) {
         throw new Error(
@@ -1722,7 +1736,10 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_today_drafts" }),
       });
-      const draftBody = (await draftResponse.json()) as EmailDraftResponse;
+      const draftBody = await readJsonResponse<EmailDraftResponse>(
+        draftResponse,
+        "Today's plan was prepared, but its draft response could not be read.",
+      );
 
       if (!draftResponse.ok) {
         throw new Error(

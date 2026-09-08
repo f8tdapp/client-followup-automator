@@ -17,6 +17,7 @@ import {
   normalizeDailyLimit,
   persistScheduleOutcomes,
   runTwoPhaseGeneration,
+  type ScheduleOutcome,
 } from "@/lib/schedule-policy";
 import {
   excludePreviouslyManuallySentEnrollments,
@@ -457,9 +458,7 @@ async function persistPreparedDailyGeneration(
     defaultTotalLimit: DEFAULT_TOTAL_DAILY_LIMIT,
     defaultNewContactLimit: DEFAULT_NEW_CONTACTS_PER_DAY,
   });
-  for (const stopped of preparedAllocation.stops) {
-    await stopEnrollment(stopped.enrollmentId, stopped.safetyStatus);
-  }
+  await stopEnrollmentsInBatches(preparedAllocation.stops);
 
   const policyResult = preparedAllocation.allocation;
 
@@ -479,6 +478,10 @@ async function persistPreparedDailyGeneration(
       rollEnrollmentForward(outcome.enrollmentId, date, 1),
     stopEnrollment: (outcome) =>
       stopEnrollment(outcome.enrollmentId, outcome.safetyStatus),
+    writeSchedules: (outcomes) => upsertScheduleRows(outcomes, date),
+    rollForwardEnrollments: (outcomes) =>
+      rollEnrollmentsForward(outcomes, date, 1),
+    stopEnrollments: (outcomes) => stopEnrollmentsInBatches(outcomes),
   });
 
   brokerDomainCounts.clear();
@@ -2258,6 +2261,111 @@ async function upsertScheduleRow(row: {
     status: row.status,
     safetyStatus: row.safetyStatus,
   });
+}
+
+async function upsertScheduleRows(outcomes: ScheduleOutcome[], date: string) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const updatedAt = new Date().toISOString();
+
+  for (const batch of chunkArray(outcomes, 100)) {
+    const { error } = await runScheduleQuery(
+      "generate_today.upsert_schedule_batch",
+      () =>
+        supabaseAdmin.from("daily_send_schedule").upsert(
+          batch.map((outcome) => ({
+            contact_id: outcome.contactId,
+            campaign_id: outcome.campaignId,
+            campaign_step_id: outcome.campaignStepId,
+            scheduled_date: date,
+            broker_domain: outcome.brokerDomain,
+            status: outcome.status,
+            reason: outcome.reason,
+            safety_status: outcome.safetyStatus,
+            updated_at: updatedAt,
+          })),
+          { onConflict: "contact_id,campaign_id,campaign_step_id,scheduled_date" },
+        ),
+    );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Daily send schedule batch upsert failed",
+        "generate_today.upsert_schedule_batch",
+        error,
+      );
+    }
+  }
+}
+
+async function rollEnrollmentsForward(
+  outcomes: ScheduleOutcome[],
+  date: string,
+  days: number,
+) {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  for (const batch of chunkArray(outcomes, 100)) {
+    const { error } = await runScheduleQuery(
+      "generate_today.roll_forward_batch",
+      () =>
+        supabaseAdmin
+          .from("contact_campaign_enrollments")
+          .update({
+            next_send_date: addDays(date, days),
+            updated_at: new Date().toISOString(),
+          })
+          .in("id", batch.map((outcome) => outcome.enrollmentId)),
+    );
+
+    if (error) {
+      throw createCampaignScheduleOperationError(
+        "Enrollment batch roll-forward failed",
+        "generate_today.roll_forward_batch",
+        error,
+      );
+    }
+  }
+}
+
+async function stopEnrollmentsInBatches(
+  outcomes: Array<{ enrollmentId: string; safetyStatus: string }>,
+) {
+  const supabaseAdmin = getSupabaseAdmin();
+  const outcomesByReason = new Map<
+    string,
+    Array<{ enrollmentId: string; safetyStatus: string }>
+  >();
+
+  for (const outcome of outcomes) {
+    const groupedOutcomes = outcomesByReason.get(outcome.safetyStatus) ?? [];
+    groupedOutcomes.push(outcome);
+    outcomesByReason.set(outcome.safetyStatus, groupedOutcomes);
+  }
+
+  for (const [stoppedReason, groupedOutcomes] of outcomesByReason) {
+    for (const batch of chunkArray(groupedOutcomes, 100)) {
+      const { error } = await runScheduleQuery(
+        "generate_today.stop_enrollment_batch",
+        () =>
+          supabaseAdmin
+            .from("contact_campaign_enrollments")
+            .update({
+              status: "stopped",
+              stopped_reason: stoppedReason,
+              updated_at: new Date().toISOString(),
+            })
+            .in("id", batch.map((outcome) => outcome.enrollmentId)),
+      );
+
+      if (error) {
+        throw createCampaignScheduleOperationError(
+          "Enrollment batch stop failed",
+          "generate_today.stop_enrollment_batch",
+          error,
+        );
+      }
+    }
+  }
 }
 
 async function rollEnrollmentForward(enrollmentId: string, date: string, days: number) {

@@ -65,6 +65,9 @@ export type ScheduleOutcomePersistence = {
   writeSchedule: (outcome: ScheduleOutcome) => Promise<void>;
   rollForwardEnrollment: (outcome: ScheduleOutcome) => Promise<void>;
   stopEnrollment: (outcome: ScheduleOutcome) => Promise<void>;
+  writeSchedules?: (outcomes: ScheduleOutcome[]) => Promise<void>;
+  rollForwardEnrollments?: (outcomes: ScheduleOutcome[]) => Promise<void>;
+  stopEnrollments?: (outcomes: ScheduleOutcome[]) => Promise<void>;
 };
 
 export type TwoPhaseGenerationBoundary<TPrepared, TResult> = {
@@ -296,6 +299,21 @@ export async function persistScheduleOutcomes(
   outcomes: ScheduleOutcome[],
   persistence: ScheduleOutcomePersistence,
 ) {
+  if (
+    persistence.writeSchedules &&
+    persistence.rollForwardEnrollments &&
+    persistence.stopEnrollments
+  ) {
+    await persistence.writeSchedules(outcomes);
+    await persistence.rollForwardEnrollments(
+      outcomes.filter((outcome) => outcome.action === "roll_forward"),
+    );
+    await persistence.stopEnrollments(
+      outcomes.filter((outcome) => outcome.action === "stop"),
+    );
+    return;
+  }
+
   for (const outcome of outcomes) {
     await persistence.writeSchedule(outcome);
 
