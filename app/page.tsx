@@ -1393,11 +1393,11 @@ export default function Dashboard() {
             }
             : scheduledDraftContactCount === 0 && emailDraftSummary.totalDrafts === 0
             ? {
-                title: "Generate today's send plan",
+                title: "Prepare today's follow-ups",
                 reason:
-                  "PipelineCue will choose today's contacts while protecting company and broker domains.",
-                actionLabel: "Go to Today's Send Plan",
-                action: () => scrollToElement(sendPlanRef),
+                  "Create today's plan and drafts together. Nothing sends automatically.",
+                actionLabel: "Prepare Today's Follow-Ups",
+                action: () => void handlePrepareTodaysFollowUps(),
                 progressStep: "plan",
               }
             : emailDraftSummary.totalDrafts === 0
@@ -1439,7 +1439,9 @@ export default function Dashboard() {
     (recommendedNextStep.actionLabel === "Create starter campaign" &&
       isCreatingStarterCampaign) ||
     (recommendedNextStep.actionLabel === "Enroll contacts" &&
-      isEnrollingContacts);
+      isEnrollingContacts) ||
+    (recommendedNextStep.actionLabel === "Prepare Today's Follow-Ups" &&
+      (isGeneratingSchedule || isGeneratingDrafts));
   const { actionable: actionableDrafts, completed: completedDrafts } =
     partitionHomeDrafts(dailyDrafts);
   const visibleDrafts = showCompletedMessages
@@ -1691,63 +1693,64 @@ export default function Dashboard() {
     setIsSyncingHubSpot(false);
   }
 
-  async function handleGenerateDailySchedule() {
+  async function handlePrepareTodaysFollowUps() {
     setError("");
     setMessage("");
     setIsGeneratingSchedule(true);
 
     try {
-      const response = await authenticatedFetch("/api/campaign-schedule", {
+      const scheduleResponse = await authenticatedFetch("/api/campaign-schedule", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_today" }),
       });
-      const body = (await response.json()) as DailySendPlan & {
+      const scheduleBody = (await scheduleResponse.json()) as DailySendPlan & {
         error?: string;
       };
 
-      if (!response.ok) {
-        throw new Error(body.error || "Unable to generate today's send plan.");
+      if (!scheduleResponse.ok) {
+        throw new Error(
+          scheduleBody.error || "Unable to prepare today's send plan.",
+        );
       }
 
-      setDailySendPlan(body);
-      const draftBody = await loadTodayDrafts();
+      setDailySendPlan(scheduleBody);
+      setIsGeneratingDrafts(true);
+
+      const draftResponse = await authenticatedFetch("/api/email-drafts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "generate_today_drafts" }),
+      });
+      const draftBody = (await draftResponse.json()) as EmailDraftResponse;
+
+      if (!draftResponse.ok) {
+        throw new Error(
+          `Today's plan was prepared, but its drafts could not be generated.${
+            draftBody.error ? ` ${draftBody.error}` : ""
+          }`,
+        );
+      }
+
+      applyEmailDraftResponse(draftBody);
       setMessage(
-        body.summary.totalScheduled > 0
-          ? `Today's send plan is ready. ${body.summary.totalScheduled} contacts are scheduled for review.`
-          : draftBody.summary.totalDrafts > 0
-            ? "Today's send plan has already been generated. Continue reviewing drafts below."
-            : body.diagnostics.reason ||
-              "Today's send plan has no scheduled contacts yet.",
+        draftBody.summary.totalDrafts > 0
+          ? `${draftBody.summary.totalDrafts} follow-ups are prepared for review. Nothing was sent.`
+          : scheduleBody.diagnostics.reason ||
+              "No contacts are due today. Nothing was sent.",
       );
-    } catch (scheduleError) {
+    } catch (prepareError) {
+      console.error("[home] prepare today's follow-ups failed", prepareError);
       setError(
-        getErrorMessage(scheduleError, "Unable to generate today's send plan."),
+        getErrorMessage(
+          prepareError,
+          "Unable to prepare today's follow-ups.",
+        ),
       );
     }
 
+    setIsGeneratingDrafts(false);
     setIsGeneratingSchedule(false);
-  }
-
-  async function loadTodayDrafts() {
-    const response = await authenticatedFetch("/api/email-drafts", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action: "list_today_drafts" }),
-    });
-    const body = (await response.json()) as EmailDraftResponse;
-
-    if (!response.ok) {
-      throw new Error(body.error || "Unable to load today's drafts.");
-    }
-
-    applyEmailDraftResponse(body);
-
-    return body;
   }
 
   async function saveSendingSettings() {
@@ -3255,11 +3258,13 @@ export default function Dashboard() {
               )}
               <button
                 className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-xs font-bold text-white shadow-sm transition hover:bg-[#0b2a52] disabled:cursor-not-allowed disabled:bg-slate-400"
-                disabled={isGeneratingSchedule}
-                onClick={handleGenerateDailySchedule}
+                disabled={isGeneratingSchedule || isGeneratingDrafts}
+                onClick={() => void handlePrepareTodaysFollowUps()}
                 type="button"
               >
-                {isGeneratingSchedule ? "Generating..." : "Generate Today"}
+                {isGeneratingSchedule || isGeneratingDrafts
+                  ? "Preparing..."
+                  : "Prepare Today's Follow-Ups"}
               </button>
             </div>
           </div>
@@ -3895,7 +3900,9 @@ export default function Dashboard() {
               </h2>
               <p className="mt-2 max-w-2xl text-base leading-7 text-slate-700">
                 {emailDraftSummary.totalDrafts === 0
-                  ? "Generate today's drafts to prepare your follow-ups. Nothing sends automatically."
+                  ? scheduledDraftContactCount > 0
+                    ? "Today's plan is ready. Prepare its drafts below. Nothing sends automatically."
+                    : "Prepare today's plan and drafts together. Nothing sends automatically."
                   : "Review, approve, or skip today's prepared follow-ups. Nothing sends automatically."}
               </p>
               <p className="mt-1 max-w-2xl text-[15px] font-normal leading-6 text-slate-600">
