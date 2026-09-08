@@ -1133,6 +1133,9 @@ export default function Dashboard() {
     body: "",
   });
   const [updatingDraftId, setUpdatingDraftId] = useState<string | null>(null);
+  const [unsubscribedDraftIds, setUnsubscribedDraftIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
   const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
@@ -2756,6 +2759,54 @@ export default function Dashboard() {
     setUpdatingDraftId(null);
   }
 
+  async function handleMarkUnsubscribed(draft: EmailDraft) {
+    const contactName = getDraftContactName(draft);
+    const confirmed = window.confirm(
+      `Mark ${contactName} as unsubscribed? This permanently stops future PipelineCue follow-ups for this contact. It does not update HubSpot.`,
+    );
+
+    if (!confirmed) return;
+
+    setError("");
+    setMessage("");
+    setUpdatingDraftId(draft.id);
+
+    try {
+      const response = await authenticatedFetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "mark_unsubscribed",
+          draftId: draft.id,
+        }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to mark contact unsubscribed.");
+      }
+
+      applyEmailDraftResponse(body);
+      setUnsubscribedDraftIds((current) => {
+        const next = new Set(current);
+        next.add(draft.id);
+        return next;
+      });
+      setMessage(
+        body.message ||
+          "Contact unsubscribed and future PipelineCue follow-ups stopped. HubSpot was not changed.",
+      );
+    } catch (draftError) {
+      setError(
+        getErrorMessage(draftError, "Unable to mark contact unsubscribed."),
+      );
+    }
+
+    setUpdatingDraftId(null);
+  }
+
   function scrollToElement(ref: { current: HTMLElement | null }) {
     window.setTimeout(() => {
       ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -4110,6 +4161,20 @@ export default function Dashboard() {
                             type="button"
                           >
                             Skip
+                          </button>
+                        )}
+                        {draft.status !== "skipped" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-bold text-rose-700 transition hover:border-rose-400 hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                            disabled={
+                              isUpdating || unsubscribedDraftIds.has(draft.id)
+                            }
+                            onClick={() => void handleMarkUnsubscribed(draft)}
+                            type="button"
+                          >
+                            {unsubscribedDraftIds.has(draft.id)
+                              ? "Unsubscribed"
+                              : "Mark Unsubscribed"}
                           </button>
                         )}
                       </div>

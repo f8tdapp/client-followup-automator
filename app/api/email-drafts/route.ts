@@ -5,6 +5,7 @@ import {
   generateTodayDrafts,
   listTodayDrafts,
   markManuallySent,
+  markUnsubscribed,
   skipDraft,
   updateDraft,
 } from "@/lib/email-drafts";
@@ -26,6 +27,7 @@ const allowedActions = [
   "approve_draft",
   "skip_draft",
   "mark_manually_sent",
+  "mark_unsubscribed",
 ] as const;
 
 type EmailDraftAction = (typeof allowedActions)[number];
@@ -101,7 +103,11 @@ export async function POST(request: Request) {
 
     assertEmailDraftRuntimeEnv();
 
-    const result = await runEmailDraftAction(action, body);
+    const result = await runEmailDraftAction(
+      action,
+      body,
+      authorization.user.email ?? "authorized owner",
+    );
 
     return Response.json(result);
   } catch (draftError) {
@@ -155,6 +161,7 @@ function normalizeEmailDraftAction(action: string): EmailDraftAction | null {
 async function runEmailDraftAction(
   action: EmailDraftAction,
   body: Extract<EmailDraftBody, { parseError: null }>,
+  actorEmail: string,
 ) {
   if (action === "generate_today_drafts") {
     return generateTodayDrafts();
@@ -180,6 +187,13 @@ async function runEmailDraftAction(
     return markManuallySent({
       draftId: body.draftId ?? "",
       note: body.note,
+    });
+  }
+
+  if (action === "mark_unsubscribed") {
+    return markUnsubscribed({
+      draftId: body.draftId ?? "",
+      actorEmail,
     });
   }
 
@@ -290,6 +304,10 @@ function getDraftRouteError(routeBranch: string) {
 
   if (routeBranch === "mark_manually_sent") {
     return "Mark manually sent failed";
+  }
+
+  if (routeBranch === "mark_unsubscribed") {
+    return "Mark unsubscribed failed";
   }
 
   return "Email drafts server error";

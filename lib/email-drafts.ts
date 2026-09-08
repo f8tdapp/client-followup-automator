@@ -369,6 +369,53 @@ export async function markManuallySent({
   };
 }
 
+export async function markUnsubscribed({
+  draftId,
+  actorEmail,
+}: {
+  draftId: string;
+  actorEmail: string;
+}) {
+  if (!draftId.trim()) {
+    throw new EmailDraftOperationError(
+      "Missing draft id.",
+      "email_drafts.mark_unsubscribed.validate",
+    );
+  }
+
+  const { data, error } = await runDraftQuery(
+    "email_drafts.mark_unsubscribed_atomic",
+    () =>
+      getSupabaseAdmin()
+        .rpc("mark_email_draft_contact_unsubscribed", {
+          requested_draft_id: draftId,
+          requested_actor: actorEmail.trim() || "authorized owner",
+          requested_at: new Date().toISOString(),
+        })
+        .returns<Array<{ result: "recorded" | "already_recorded" }>>(),
+  );
+
+  if (error) {
+    throw createEmailDraftError("email_drafts.mark_unsubscribed_atomic", error);
+  }
+
+  const result = Array.isArray(data) && data.length === 1 ? data[0]?.result : undefined;
+  if (!result || !["recorded", "already_recorded"].includes(result)) {
+    throw new EmailDraftOperationError(
+      "Atomic unsubscribe operation returned no recognized result.",
+      "email_drafts.mark_unsubscribed_atomic",
+    );
+  }
+
+  return {
+    ...(await listTodayDrafts()),
+    message:
+      result === "already_recorded"
+        ? "This contact was already unsubscribed. No future follow-ups will be prepared."
+        : "Contact unsubscribed and future follow-ups stopped. HubSpot was not changed.",
+  };
+}
+
 async function updateDraftStatus({
   draftId,
   status,
