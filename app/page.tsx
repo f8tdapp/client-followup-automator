@@ -1419,8 +1419,8 @@ export default function Dashboard() {
                   title: "Generate today's drafts",
                   reason:
                     "Prepare emails for today's scheduled contacts. Nothing sends automatically.",
-                  actionLabel: "Go to Today's Follow-Ups",
-                  action: () => scrollToElement(draftReviewRef),
+                  actionLabel: "Generate Today's Drafts",
+                  action: () => void handleGenerateDraftsPreview(),
                   progressStep: "drafts",
                 }
               : draftStatusCounts.needsReview > 0
@@ -1455,7 +1455,9 @@ export default function Dashboard() {
     (recommendedNextStep.actionLabel === "Enroll contacts" &&
       isEnrollingContacts) ||
     (recommendedNextStep.actionLabel === "Prepare Today's Follow-Ups" &&
-      (isGeneratingSchedule || isGeneratingDrafts));
+      (isGeneratingSchedule || isGeneratingDrafts)) ||
+    (recommendedNextStep.actionLabel === "Generate Today's Drafts" &&
+      isGeneratingDrafts);
   const { actionable: actionableDrafts, completed: completedDrafts } =
     partitionHomeDrafts(dailyDrafts);
   const visibleDrafts = showCompletedMessages
@@ -3928,27 +3930,6 @@ export default function Dashboard() {
                 does not send anything.
               </p>
             </div>
-            {scheduledDraftContactCount > 0 && (
-            <div className="shrink-0 lg:max-w-xs lg:text-right">
-              <button
-                className="h-10 cursor-pointer whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
-                disabled={isGeneratingDrafts}
-                onClick={() => void handleGenerateDraftsPreview()}
-                type="button"
-              >
-                {isGeneratingDrafts
-                  ? "Generating drafts..."
-                  : "Generate today's drafts"}
-              </button>
-              {emailDraftSummary.totalDrafts === 0 ? (
-                <p className="mt-2 max-w-xs text-xs font-medium leading-5 text-slate-500">
-                  No drafts yet. Click Generate Today&apos;s Drafts to prepare
-                  emails for today&apos;s scheduled contacts. Nothing sends
-                  automatically.
-                </p>
-              ) : null}
-            </div>
-            )}
           </div>
 
           {dailyDrafts.length > 0 && (
