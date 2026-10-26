@@ -5,7 +5,9 @@ import {
   generateTodayDrafts,
   listTodayDrafts,
   markManuallySent,
+  markBounced,
   markUnsubscribed,
+  recordContactBounces,
   skipDraft,
   updateDraft,
 } from "@/lib/email-drafts";
@@ -28,6 +30,8 @@ const allowedActions = [
   "skip_draft",
   "mark_manually_sent",
   "mark_unsubscribed",
+  "mark_bounced",
+  "record_bounces",
 ] as const;
 
 type EmailDraftAction = (typeof allowedActions)[number];
@@ -39,6 +43,8 @@ type EmailDraftBody =
       subject?: string;
       body?: string;
       note?: string;
+      bounceKind?: string;
+      emails?: string[];
       parseError: null;
     }
   | {
@@ -129,6 +135,8 @@ async function readEmailDraftBody(request: Request): Promise<EmailDraftBody> {
       subject?: unknown;
       body?: unknown;
       note?: unknown;
+      bounceKind?: unknown;
+      emails?: unknown;
     };
 
     return {
@@ -140,6 +148,11 @@ async function readEmailDraftBody(request: Request): Promise<EmailDraftBody> {
       subject: typeof body.subject === "string" ? body.subject : undefined,
       body: typeof body.body === "string" ? body.body : undefined,
       note: typeof body.note === "string" ? body.note : undefined,
+      bounceKind:
+        typeof body.bounceKind === "string" ? body.bounceKind : undefined,
+      emails: Array.isArray(body.emails)
+        ? body.emails.filter((value): value is string => typeof value === "string")
+        : undefined,
       parseError: null,
     };
   } catch {
@@ -193,6 +206,22 @@ async function runEmailDraftAction(
   if (action === "mark_unsubscribed") {
     return markUnsubscribed({
       draftId: body.draftId ?? "",
+      actorEmail,
+    });
+  }
+
+  if (action === "mark_bounced") {
+    return markBounced({
+      draftId: body.draftId ?? "",
+      kind: body.bounceKind,
+      actorEmail,
+    });
+  }
+
+  if (action === "record_bounces") {
+    return recordContactBounces({
+      emails: body.emails ?? [],
+      kind: body.bounceKind,
       actorEmail,
     });
   }
@@ -308,6 +337,14 @@ function getDraftRouteError(routeBranch: string) {
 
   if (routeBranch === "mark_unsubscribed") {
     return "Mark unsubscribed failed";
+  }
+
+  if (routeBranch === "mark_bounced") {
+    return "Mark bounced failed";
+  }
+
+  if (routeBranch === "record_bounces") {
+    return "Record bounces failed";
   }
 
   return "Email drafts server error";
