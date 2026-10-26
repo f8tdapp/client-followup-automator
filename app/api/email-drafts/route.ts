@@ -12,6 +12,7 @@ import {
   updateDraft,
 } from "@/lib/email-drafts";
 import { authorizeOwner } from "@/lib/authorization";
+import { getEmailDomain } from "@/lib/results-summary";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -58,7 +59,10 @@ export async function GET() {
   try {
     assertEmailDraftRuntimeEnv();
 
-    return Response.json(await listTodayDrafts());
+    return Response.json({
+      ...(await listTodayDrafts()),
+      ownerDomain: getEmailDomain(authorization.user.email),
+    });
   } catch (draftError) {
     return handleDraftError(draftError, "list_today_drafts");
   }
@@ -115,7 +119,10 @@ export async function POST(request: Request) {
       authorization.user.email ?? "authorized owner",
     );
 
-    return Response.json(result);
+    return Response.json({
+      ...result,
+      ownerDomain: getEmailDomain(authorization.user.email),
+    });
   } catch (draftError) {
     return handleDraftError(draftError, routeBranch);
   }

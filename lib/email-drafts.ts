@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { getEmailDomain } from "@/lib/results-summary";
 import {
   type BounceRecordResult,
   isBounceKind,
@@ -484,9 +485,11 @@ export async function recordContactBounces({
   kind: unknown;
   actorEmail: string;
 }) {
+  const ownerDomain = getEmailDomain(actorEmail);
   const requestedEmails = Array.isArray(emails)
     ? parseBounceEmailInput(
         emails.filter((value): value is string => typeof value === "string").join("\n"),
+        ownerDomain ? [ownerDomain] : [],
       )
     : [];
 
