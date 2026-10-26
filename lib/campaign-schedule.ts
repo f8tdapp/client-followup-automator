@@ -316,13 +316,17 @@ async function generateNewDailySendSchedule(date: string, requestedAt: string) {
         const { error } = await runScheduleQuery(
           "generate_today.compute_domain_limits",
           () =>
+            // Only add brokerages seen for the first time. Existing rows keep
+            // their limit: an owner-lowered limit (for example 1 for a firm
+            // whose spam filter blocks cold email) must survive every day's
+            // plan. New brokerages start at the strictest active campaign limit.
             supabaseAdmin.from("broker_domain_limits").upsert(
               Array.from(brokerDomainCounts.keys()).map((brokerDomain) => ({
                 broker_domain: brokerDomain,
-                daily_limit: 3,
+                daily_limit: getDefaultBrokerDomainLimit(campaigns),
                 updated_at: new Date().toISOString(),
               })),
-              { onConflict: "broker_domain" },
+              { onConflict: "broker_domain", ignoreDuplicates: true },
             ),
         );
 
@@ -2041,6 +2045,15 @@ function countSuppressionRules(rulesByContact: Map<string, SuppressionRuleRow[]>
   }
 
   return ruleCount;
+}
+
+export function getDefaultBrokerDomainLimit(
+  campaigns: ReadonlyArray<{ broker_domain_daily_limit: number | null }>,
+) {
+  const limits = campaigns
+    .map((campaign) => campaign.broker_domain_daily_limit)
+    .filter((limit): limit is number => typeof limit === "number" && limit > 0);
+  return limits.length > 0 ? Math.min(...limits) : 3;
 }
 
 async function getBrokerDomainLimits() {
