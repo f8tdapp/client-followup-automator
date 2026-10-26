@@ -30,6 +30,18 @@ import {
   runForecastRequest,
 } from "@/lib/workload-forecast-ui";
 import { shouldProceedWithEnrollment } from "@/lib/campaign-enrollment-ui";
+import {
+  type BounceKind,
+  type BounceRecordResult,
+  bounceKindLabels,
+  bounceKinds,
+  maxBounceEmailsPerRequest,
+  parseBounceEmailInput,
+} from "@/lib/bounce-recording";
+
+// The owner's own sending domain appears in pasted bounce notices; never treat
+// it as a bounced contact.
+const ownSendingDomains = ["listingmediact.com"];
 
 type Client = {
   id: string;
@@ -271,6 +283,7 @@ type EmailDraftResponse = {
   message?: string;
   error?: string;
   details?: string;
+  bounceResults?: BounceRecordResult[];
 };
 
 type SendingSettings = {
@@ -1136,6 +1149,13 @@ export default function Dashboard() {
   const [unsubscribedDraftIds, setUnsubscribedDraftIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [bouncedDraftIds, setBouncedDraftIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [bounceInput, setBounceInput] = useState("");
+  const [bounceKind, setBounceKind] = useState<BounceKind>("address_not_found");
+  const [isRecordingBounces, setIsRecordingBounces] = useState(false);
+  const [bounceResults, setBounceResults] = useState<BounceRecordResult[]>([]);
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
   const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
@@ -2807,6 +2827,109 @@ export default function Dashboard() {
     setUpdatingDraftId(null);
   }
 
+  async function handleMarkBounced(draft: EmailDraft) {
+    const contactName = getDraftContactName(draft);
+    const confirmed = window.confirm(
+      `Mark ${contactName} (${draft.contact_email}) as bounced? This permanently stops future PipelineCue follow-ups to this address. It does not update HubSpot.`,
+    );
+
+    if (!confirmed) return;
+
+    setError("");
+    setMessage("");
+    setUpdatingDraftId(draft.id);
+
+    try {
+      const response = await authenticatedFetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "mark_bounced",
+          draftId: draft.id,
+          bounceKind: "other",
+        }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to mark address bounced.");
+      }
+
+      applyEmailDraftResponse(body);
+      setBouncedDraftIds((current) => {
+        const next = new Set(current);
+        next.add(draft.id);
+        return next;
+      });
+      setMessage(
+        body.message ||
+          "Address marked bounced and future PipelineCue follow-ups stopped. HubSpot was not changed.",
+      );
+    } catch (draftError) {
+      setError(getErrorMessage(draftError, "Unable to mark address bounced."));
+    }
+
+    setUpdatingDraftId(null);
+  }
+
+  async function handleRecordBounces(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const emails = parseBounceEmailInput(bounceInput, ownSendingDomains);
+
+    if (emails.length === 0) {
+      setError("Paste at least one bounced email address.");
+      return;
+    }
+
+    if (emails.length > maxBounceEmailsPerRequest) {
+      setError(
+        `Record at most ${maxBounceEmailsPerRequest} addresses at a time.`,
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Record ${emails.length} address${emails.length === 1 ? "" : "es"} as bounced (${bounceKindLabels[bounceKind].toLowerCase()})?\n\n${emails.join("\n")}\n\nThis permanently stops future PipelineCue follow-ups to these addresses. It does not update HubSpot.`,
+    );
+
+    if (!confirmed) return;
+
+    setError("");
+    setMessage("");
+    setIsRecordingBounces(true);
+
+    try {
+      const response = await authenticatedFetch("/api/email-drafts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "record_bounces",
+          emails,
+          bounceKind,
+        }),
+      });
+      const body = (await response.json()) as EmailDraftResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to record bounces.");
+      }
+
+      applyEmailDraftResponse(body);
+      setBounceResults(body.bounceResults ?? []);
+      setBounceInput("");
+      setMessage(body.message || "Bounces recorded. HubSpot was not changed.");
+    } catch (bounceError) {
+      setError(getErrorMessage(bounceError, "Unable to record bounces."));
+    }
+
+    setIsRecordingBounces(false);
+  }
+
   function scrollToElement(ref: { current: HTMLElement | null }) {
     window.setTimeout(() => {
       ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -3233,6 +3356,85 @@ export default function Dashboard() {
 
         {!isInitialWorkspaceLoading && (
         <>
+        <details className="group rounded-2xl border border-amber-200 bg-white font-sans shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-4 text-lg font-semibold leading-6 text-slate-900 transition hover:bg-amber-50/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-amber-500 sm:p-5">
+            <span>
+              Record bounced emails
+              <span className="mt-1 block text-[15px] font-normal leading-6 text-slate-700">
+                Paste addresses or bounce notices from Gmail to stop future follow-ups.
+              </span>
+            </span>
+            <span aria-hidden="true" className="text-amber-700 transition group-open:rotate-180">v</span>
+          </summary>
+          <form
+            className="grid gap-3 border-t border-amber-100 p-4 sm:p-5"
+            onSubmit={(event) => void handleRecordBounces(event)}
+          >
+            <label className="flex flex-col gap-1.5 text-[15px] font-medium text-slate-800">
+              Bounced addresses
+              <textarea
+                className="min-h-28 rounded-xl border border-slate-300 bg-white px-3 py-2 font-normal outline-none transition focus:border-amber-600 focus:ring-2 focus:ring-amber-100"
+                onChange={(event) => setBounceInput(event.target.value)}
+                placeholder={"One address per line, or paste the bounce message text.\nExample: agent@brokerage.com"}
+                value={bounceInput}
+              />
+            </label>
+            <p className="text-sm leading-6 text-slate-600">
+              {(() => {
+                const parsedCount = parseBounceEmailInput(
+                  bounceInput,
+                  ownSendingDomains,
+                ).length;
+                return parsedCount === 0
+                  ? "No addresses found yet. Your own sending address is ignored."
+                  : `${parsedCount} address${parsedCount === 1 ? "" : "es"} found. You will see the full list before anything is recorded.`;
+              })()}
+            </p>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <label className="flex flex-col gap-1.5 text-[15px] font-medium text-slate-800">
+                What happened
+                <select
+                  className="h-10 rounded-xl border border-slate-300 bg-white px-3 font-normal outline-none transition focus:border-amber-600 focus:ring-2 focus:ring-amber-100"
+                  onChange={(event) => setBounceKind(event.target.value as BounceKind)}
+                  value={bounceKind}
+                >
+                  {bounceKinds.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {bounceKindLabels[kind]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-amber-600 px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={isRecordingBounces || !bounceInput.trim()}
+                type="submit"
+              >
+                {isRecordingBounces ? "Recording..." : "Record Bounces"}
+              </button>
+            </div>
+            <p className="text-sm leading-6 text-slate-600">
+              Each address is permanently suppressed in PipelineCue. Active campaigns stop and unsent drafts are skipped. Sent history is kept. It does not update HubSpot.
+            </p>
+            {bounceResults.length > 0 && (
+              <ul className="grid gap-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">
+                {bounceResults.map((row) => (
+                  <li className="flex flex-wrap justify-between gap-2" key={row.email}>
+                    <span className="break-all font-medium text-slate-900">{row.email}</span>
+                    <span>
+                      {row.result === "recorded"
+                        ? "Suppressed"
+                        : row.result === "already_recorded"
+                          ? "Already suppressed"
+                          : "Not found in PipelineCue"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </form>
+        </details>
+
         <details
           className="group rounded-2xl border border-slate-300 bg-slate-100 font-sans shadow-[0_16px_46px_rgba(15,23,42,0.11)]"
           open={activeView === "send-plan" ? true : undefined}
@@ -4175,6 +4377,18 @@ export default function Dashboard() {
                             {unsubscribedDraftIds.has(draft.id)
                               ? "Unsubscribed"
                               : "Mark Unsubscribed"}
+                          </button>
+                        )}
+                        {draft.status !== "skipped" && (
+                          <button
+                            className="whitespace-nowrap rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm font-bold text-amber-800 transition hover:border-amber-400 hover:bg-amber-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                            disabled={isUpdating || bouncedDraftIds.has(draft.id)}
+                            onClick={() => void handleMarkBounced(draft)}
+                            type="button"
+                          >
+                            {bouncedDraftIds.has(draft.id)
+                              ? "Bounced"
+                              : "Mark Bounced"}
                           </button>
                         )}
                       </div>

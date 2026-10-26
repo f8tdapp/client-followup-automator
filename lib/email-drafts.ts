@@ -1,4 +1,11 @@
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import {
+  type BounceRecordResult,
+  isBounceKind,
+  maxBounceEmailsPerRequest,
+  parseBounceEmailInput,
+  summarizeBounceResults,
+} from "@/lib/bounce-recording";
 
 type SupabaseErrorLike = {
   message?: string;
@@ -413,6 +420,127 @@ export async function markUnsubscribed({
       result === "already_recorded"
         ? "This contact was already unsubscribed. No future follow-ups will be prepared."
         : "Contact unsubscribed and future follow-ups stopped. HubSpot was not changed.",
+  };
+}
+
+export async function markBounced({
+  draftId,
+  kind,
+  actorEmail,
+}: {
+  draftId: string;
+  kind: unknown;
+  actorEmail: string;
+}) {
+  if (!draftId.trim()) {
+    throw new EmailDraftOperationError(
+      "Missing draft id.",
+      "email_drafts.mark_bounced.validate",
+    );
+  }
+
+  const bounceKind = isBounceKind(kind) ? kind : "other";
+
+  const { data, error } = await runDraftQuery(
+    "email_drafts.mark_bounced_atomic",
+    () =>
+      getSupabaseAdmin()
+        .rpc("mark_email_draft_contact_bounced", {
+          requested_draft_id: draftId,
+          requested_kind: bounceKind,
+          requested_actor: actorEmail.trim() || "authorized owner",
+          requested_at: new Date().toISOString(),
+        })
+        .returns<Array<{ result: "recorded" | "already_recorded" }>>(),
+  );
+
+  if (error) {
+    throw createEmailDraftError("email_drafts.mark_bounced_atomic", error);
+  }
+
+  const result = Array.isArray(data) && data.length === 1 ? data[0]?.result : undefined;
+  if (!result || !["recorded", "already_recorded"].includes(result)) {
+    throw new EmailDraftOperationError(
+      "Atomic bounce operation returned no recognized result.",
+      "email_drafts.mark_bounced_atomic",
+    );
+  }
+
+  return {
+    ...(await listTodayDrafts()),
+    message:
+      result === "already_recorded"
+        ? "This address was already marked bounced. No future follow-ups will be prepared."
+        : "Address marked bounced and future follow-ups stopped. HubSpot was not changed.",
+  };
+}
+
+export async function recordContactBounces({
+  emails,
+  kind,
+  actorEmail,
+}: {
+  emails: unknown;
+  kind: unknown;
+  actorEmail: string;
+}) {
+  const requestedEmails = Array.isArray(emails)
+    ? parseBounceEmailInput(
+        emails.filter((value): value is string => typeof value === "string").join("\n"),
+      )
+    : [];
+
+  if (requestedEmails.length === 0) {
+    throw new EmailDraftOperationError(
+      "Enter at least one email address.",
+      "email_drafts.record_bounces.validate",
+    );
+  }
+
+  if (requestedEmails.length > maxBounceEmailsPerRequest) {
+    throw new EmailDraftOperationError(
+      `Record at most ${maxBounceEmailsPerRequest} addresses at a time.`,
+      "email_drafts.record_bounces.validate",
+    );
+  }
+
+  if (!isBounceKind(kind)) {
+    throw new EmailDraftOperationError(
+      "Choose a bounce type.",
+      "email_drafts.record_bounces.validate",
+    );
+  }
+
+  const { data, error } = await runDraftQuery(
+    "email_drafts.record_bounces_atomic",
+    () =>
+      getSupabaseAdmin()
+        .rpc("record_contact_bounces", {
+          requested_emails: requestedEmails,
+          requested_kind: kind,
+          requested_actor: actorEmail.trim() || "authorized owner",
+          requested_at: new Date().toISOString(),
+        })
+        .returns<BounceRecordResult[]>(),
+  );
+
+  if (error) {
+    throw createEmailDraftError("email_drafts.record_bounces_atomic", error);
+  }
+
+  if (!Array.isArray(data) || data.length !== requestedEmails.length) {
+    throw new EmailDraftOperationError(
+      "Bounce recording returned an unexpected result.",
+      "email_drafts.record_bounces_atomic",
+    );
+  }
+
+  const summary = summarizeBounceResults(data);
+
+  return {
+    ...(await listTodayDrafts()),
+    bounceResults: data,
+    message: summary.message,
   };
 }
 
