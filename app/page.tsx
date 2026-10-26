@@ -38,10 +38,21 @@ import {
   maxBounceEmailsPerRequest,
   parseBounceEmailInput,
 } from "@/lib/bounce-recording";
-
-// The owner's own sending domain appears in pasted bounce notices; never treat
-// it as a bounced contact.
-const ownSendingDomains = ["listingmediact.com"];
+import {
+  type ContactOutcome,
+  type OutcomeRecordResult,
+  type ResultsSummary,
+  type StoppedOutcome,
+  bounceRateWarningThreshold,
+  contactOutcomeLabels,
+  contactOutcomes,
+  formatPercent,
+  getBounceRate,
+  getOutcomeCount,
+  maxOutcomeEmailsPerRequest,
+  maxOutcomeNoteLength,
+  stoppedOutcomeLabels,
+} from "@/lib/results-summary";
 
 type Client = {
   id: string;
@@ -284,6 +295,7 @@ type EmailDraftResponse = {
   error?: string;
   details?: string;
   bounceResults?: BounceRecordResult[];
+  ownerEmail?: string | null;
 };
 
 type SendingSettings = {
@@ -1156,6 +1168,10 @@ export default function Dashboard() {
   const [bounceKind, setBounceKind] = useState<BounceKind>("address_not_found");
   const [isRecordingBounces, setIsRecordingBounces] = useState(false);
   const [bounceResults, setBounceResults] = useState<BounceRecordResult[]>([]);
+  // The signed-in owner's own address appears in pasted bounce notices; it is
+  // never treated as a bounced contact. Only that exact address is excluded,
+  // never its whole domain. The server excludes it too.
+  const [ownEmailAddresses, setOwnEmailAddresses] = useState<string[]>([]);
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
   const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
@@ -1168,7 +1184,13 @@ export default function Dashboard() {
   const [showMoreActions, setShowMoreActions] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [activeView, setActiveView] = useState<
-    "home" | "send-plan" | "campaigns" | "contacts" | "settings" | "advanced"
+    | "home"
+    | "send-plan"
+    | "results"
+    | "campaigns"
+    | "contacts"
+    | "settings"
+    | "advanced"
   >("home");
   const [showDailyWorkflow, setShowDailyWorkflow] = useState(false);
   const [showAdminTools, setShowAdminTools] = useState(false);
@@ -1672,6 +1694,9 @@ export default function Dashboard() {
   function applyEmailDraftResponse(body: EmailDraftResponse) {
     setDailyDrafts(body.drafts ?? []);
     setEmailDraftSummary(body.summary ?? emptyEmailDraftSummary);
+    if (body.ownerEmail) {
+      setOwnEmailAddresses([body.ownerEmail]);
+    }
   }
 
   function handleConnectHubSpot() {
@@ -2141,6 +2166,9 @@ export default function Dashboard() {
 
             setDailyDrafts(draftsBody.drafts ?? []);
             setEmailDraftSummary(draftsBody.summary ?? emptyEmailDraftSummary);
+            if (draftsBody.ownerEmail) {
+              setOwnEmailAddresses([draftsBody.ownerEmail]);
+            }
           }
 
           if (sendingSettingsResponse.ok) {
@@ -2877,7 +2905,7 @@ export default function Dashboard() {
   async function handleRecordBounces(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const emails = parseBounceEmailInput(bounceInput, ownSendingDomains);
+    const emails = parseBounceEmailInput(bounceInput, [], ownEmailAddresses);
 
     if (emails.length === 0) {
       setError("Paste at least one bounced email address.");
@@ -2955,6 +2983,12 @@ export default function Dashboard() {
     if (item === "Today's Send Plan") {
       setActiveView("send-plan");
       scrollToElement(sendPlanRef);
+      return;
+    }
+
+    if (item === "Results") {
+      setActiveView("results");
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
 
@@ -3067,6 +3101,7 @@ export default function Dashboard() {
               {[
                 "Home",
                 "Today's Send Plan",
+                "Results",
                 "Campaigns",
                 "HubSpot Contacts",
                 "Settings",
@@ -3383,7 +3418,8 @@ export default function Dashboard() {
               {(() => {
                 const parsedCount = parseBounceEmailInput(
                   bounceInput,
-                  ownSendingDomains,
+                  [],
+                  ownEmailAddresses,
                 ).length;
                 return parsedCount === 0
                   ? "No addresses found yet. Your own sending address is ignored."
@@ -4500,6 +4536,10 @@ export default function Dashboard() {
         )}
 
         </>
+        )}
+
+        {activeView === "results" && (
+          <ResultsView fetcher={authenticatedFetch} />
         )}
 
         {activeView === "campaigns" && (
@@ -6194,5 +6234,482 @@ export default function Dashboard() {
         </div>
       </div>
     </main>
+  );
+}
+
+type ResultsResponse = {
+  ok?: boolean;
+  error?: string;
+  summary?: ResultsSummary;
+  ownerEmail?: string | null;
+  outcomeResults?: OutcomeRecordResult[];
+  message?: string;
+};
+
+const stoppedOutcomeClasses: Record<StoppedOutcome, string> = {
+  bounced: "border-amber-200 bg-amber-50 text-amber-900",
+  unsubscribed: "border-rose-200 bg-rose-50 text-rose-900",
+  replied: "border-emerald-200 bg-emerald-50 text-emerald-900",
+  do_not_contact: "border-slate-300 bg-slate-100 text-slate-800",
+};
+
+const stoppedListPreviewSize = 25;
+
+function ResultsView({
+  fetcher,
+}: {
+  fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+}) {
+  const [resultsSummary, setResultsSummary] = useState<ResultsSummary | null>(null);
+  const [resultsOwnerEmail, setResultsOwnerEmail] = useState<string | null>(null);
+  const [isLoadingResults, setIsLoadingResults] = useState(true);
+  const [resultsError, setResultsError] = useState("");
+  const [resultsMessage, setResultsMessage] = useState("");
+  const [outcomeInput, setOutcomeInput] = useState("");
+  const [outcomeKind, setOutcomeKind] = useState<ContactOutcome>("unsubscribed");
+  const [outcomeNote, setOutcomeNote] = useState("");
+  const [isRecordingOutcome, setIsRecordingOutcome] = useState(false);
+  const [outcomeResults, setOutcomeResults] = useState<OutcomeRecordResult[]>([]);
+  const [stoppedFilter, setStoppedFilter] = useState<StoppedOutcome | "all">("all");
+  const [showAllStopped, setShowAllStopped] = useState(false);
+
+  const loadResults = useCallback(
+    async (isActive: () => boolean = () => true) => {
+      setIsLoadingResults(true);
+      setResultsError("");
+
+      try {
+        const response = await fetcher("/api/results");
+        const body = (await response.json()) as ResultsResponse;
+
+        if (!response.ok || !body.summary) {
+          throw new Error(body.error || "Unable to load results.");
+        }
+
+        if (!isActive()) return;
+        setResultsSummary(body.summary);
+        setResultsOwnerEmail(body.ownerEmail ?? null);
+      } catch (loadError) {
+        if (!isActive()) return;
+        setResultsError(getErrorMessage(loadError, "Unable to load results."));
+      }
+
+      if (isActive()) setIsLoadingResults(false);
+    },
+    [fetcher],
+  );
+
+  useEffect(() => {
+    let isActive = true;
+    window.setTimeout(() => {
+      void loadResults(() => isActive);
+    }, 0);
+    return () => {
+      isActive = false;
+    };
+  }, [loadResults]);
+
+  const parsedOutcomeEmails = useMemo(
+    () =>
+      parseBounceEmailInput(
+        outcomeInput,
+        [],
+        resultsOwnerEmail ? [resultsOwnerEmail] : [],
+      ),
+    [outcomeInput, resultsOwnerEmail],
+  );
+
+  async function handleRecordOutcomes(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (parsedOutcomeEmails.length === 0) {
+      setResultsError("Paste at least one email address.");
+      return;
+    }
+
+    if (parsedOutcomeEmails.length > maxOutcomeEmailsPerRequest) {
+      setResultsError(
+        `Record at most ${maxOutcomeEmailsPerRequest} addresses at a time.`,
+      );
+      return;
+    }
+
+    const label = stoppedOutcomeLabels[outcomeKind].toLowerCase();
+    const confirmed = window.confirm(
+      `Record ${parsedOutcomeEmails.length} address${parsedOutcomeEmails.length === 1 ? "" : "es"} as ${label}?\n\n${parsedOutcomeEmails.join("\n")}\n\nThis permanently stops future PipelineCue follow-ups to these addresses. It does not update HubSpot.`,
+    );
+
+    if (!confirmed) return;
+
+    setResultsError("");
+    setResultsMessage("");
+    setIsRecordingOutcome(true);
+
+    try {
+      const response = await fetcher("/api/results", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "record_outcomes",
+          emails: parsedOutcomeEmails,
+          outcome: outcomeKind,
+          note: outcomeNote,
+        }),
+      });
+      const body = (await response.json()) as ResultsResponse;
+
+      if (!response.ok) {
+        throw new Error(body.error || "Unable to record these contacts.");
+      }
+
+      if (body.summary) setResultsSummary(body.summary);
+      setOutcomeResults(body.outcomeResults ?? []);
+      setOutcomeInput("");
+      setOutcomeNote("");
+      setResultsMessage(body.message || "Recorded. HubSpot was not changed.");
+    } catch (recordError) {
+      setResultsError(
+        getErrorMessage(recordError, "Unable to record these contacts."),
+      );
+    }
+
+    setIsRecordingOutcome(false);
+  }
+
+  const bounceRate = resultsSummary ? getBounceRate(resultsSummary) : null;
+  const bounceRateIsHigh =
+    bounceRate !== null && bounceRate > bounceRateWarningThreshold;
+  const stoppedContacts = (resultsSummary?.stopped_contacts ?? []).filter(
+    (contact) => stoppedFilter === "all" || contact.outcome === stoppedFilter,
+  );
+  const visibleStoppedContacts = showAllStopped
+    ? stoppedContacts
+    : stoppedContacts.slice(0, stoppedListPreviewSize);
+  const health = resultsSummary?.health;
+  const healthIsClean =
+    health !== undefined &&
+    health.duplicate_step_sends === 0 &&
+    health.stopped_still_active === 0;
+
+  return (
+    <div className="grid gap-4 font-sans">
+      <section className="rounded-2xl border border-cyan-200 bg-white p-5 shadow-[0_16px_46px_rgba(15,23,42,0.12)]">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-[13px] font-medium uppercase tracking-[0.08em] text-cyan-700">
+              Results
+            </p>
+            <h2 className="mt-1 text-xl font-semibold leading-7 text-slate-950 sm:text-[22px]">
+              How your follow-ups are doing
+            </h2>
+            <p className="mt-2 max-w-2xl text-[15px] leading-6 text-slate-700">
+              {resultsSummary?.first_sent_at
+                ? `Every email marked sent from ${formatDate(resultsSummary.first_sent_at)} to ${formatDate(resultsSummary.last_sent_at)}. Updated ${formatDateTime(resultsSummary.generated_at)}.`
+                : "Numbers appear here once emails are marked sent."}
+            </p>
+          </div>
+          <button
+            className="h-10 shrink-0 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-4 text-[15px] font-semibold text-slate-700 transition hover:border-cyan-500 hover:text-cyan-800 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:text-slate-400"
+            disabled={isLoadingResults}
+            onClick={() => void loadResults()}
+            type="button"
+          >
+            {isLoadingResults ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        {(resultsError || resultsMessage) && (
+          <div
+            aria-live="polite"
+            className={`mt-4 rounded-xl border px-4 py-3 text-[15px] leading-6 ${
+              resultsError
+                ? "border-rose-200 bg-rose-50 text-rose-900"
+                : "border-emerald-200 bg-emerald-50 text-emerald-900"
+            }`}
+          >
+            {resultsError || resultsMessage}
+          </div>
+        )}
+
+        {resultsSummary && (
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm text-slate-600">Agents emailed</p>
+              <p className="mt-1 text-3xl font-semibold text-slate-950">
+                {resultsSummary.agents_emailed}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                {resultsSummary.emails_sent} emails sent in total
+              </p>
+            </div>
+            <div
+              className={`rounded-xl border p-4 ${
+                bounceRateIsHigh
+                  ? "border-amber-300 bg-amber-50"
+                  : "border-slate-200 bg-slate-50"
+              }`}
+            >
+              <p className="text-sm text-slate-600">Bounce rate</p>
+              <p className="mt-1 text-3xl font-semibold text-slate-950">
+                {formatPercent(bounceRate)}
+              </p>
+              <p className={`mt-1 text-sm ${bounceRateIsHigh ? "font-medium text-amber-900" : "text-slate-600"}`}>
+                {resultsSummary.bounced_emailed} of {resultsSummary.agents_emailed} agents bounced
+                {bounceRateIsHigh
+                  ? `. Above ${formatPercent(bounceRateWarningThreshold)}, bounces can hurt your email reputation.`
+                  : ""}
+              </p>
+            </div>
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+              <p className="text-sm text-slate-600">Replies recorded</p>
+              <p className="mt-1 text-3xl font-semibold text-slate-950">
+                {getOutcomeCount(resultsSummary, "replied")}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                Only replies recorded in PipelineCue
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm text-slate-600">Unsubscribed</p>
+              <p className="mt-1 text-3xl font-semibold text-slate-950">
+                {getOutcomeCount(resultsSummary, "unsubscribed")}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                Recorded here. {resultsSummary.hubspot_unsubscribed} contacts are unsubscribed in total, including HubSpot.
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm text-slate-600">Finished the sequence</p>
+              <p className="mt-1 text-3xl font-semibold text-slate-950">
+                {resultsSummary.agents_completed}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                {resultsSummary.sent_by_step
+                  .map((row) => `Email ${row.step ?? "?"}: ${row.sent}`)
+                  .join(" · ") || "No emails sent yet"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-dashed border-slate-300 bg-white p-4">
+              <p className="text-sm text-slate-600">Bookings</p>
+              <p className="mt-1 text-xl font-semibold text-slate-500">
+                Not tracked yet
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                Booked shoots and job value will show here once booking tracking is added.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {health && (
+          <p
+            className={`mt-4 rounded-xl border px-4 py-3 text-[15px] leading-6 ${
+              healthIsClean
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-rose-200 bg-rose-50 text-rose-900"
+            }`}
+          >
+            {healthIsClean
+              ? "Safety check passed: no agent has received the same email twice, and every stopped contact is fully stopped."
+              : `Safety check needs attention: ${health.duplicate_step_sends} duplicate email${health.duplicate_step_sends === 1 ? "" : "s"}, ${health.stopped_still_active} stopped contact${health.stopped_still_active === 1 ? "" : "s"} still in an active campaign or with a pending draft.`}
+          </p>
+        )}
+      </section>
+
+      {resultsSummary && resultsSummary.by_domain.length > 0 && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+          <h3 className="text-lg font-semibold text-slate-950">
+            Bounces by brokerage
+          </h3>
+          <p className="mt-1 text-[15px] leading-6 text-slate-700">
+            Brokerages where emails bounced most. &quot;Blocked&quot; means their server refused your email, so the address may still be real.
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[480px] text-left text-[15px]">
+              <thead>
+                <tr className="border-b border-slate-200 text-sm text-slate-600">
+                  <th className="py-2 pr-3 font-medium">Email domain</th>
+                  <th className="py-2 pr-3 text-right font-medium">Agents emailed</th>
+                  <th className="py-2 pr-3 text-right font-medium">Bounced</th>
+                  <th className="py-2 text-right font-medium">Blocked</th>
+                </tr>
+              </thead>
+              <tbody>
+                {resultsSummary.by_domain.map((row) => (
+                  <tr className="border-b border-slate-100" key={row.domain}>
+                    <td className="py-2 pr-3 font-medium text-slate-900">{row.domain}</td>
+                    <td className="py-2 pr-3 text-right text-slate-700">{row.agents_emailed}</td>
+                    <td className="py-2 pr-3 text-right text-slate-900">{row.bounced}</td>
+                    <td className="py-2 text-right text-slate-700">{row.blocked}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+        <h3 className="text-lg font-semibold text-slate-950">
+          Record a reply or unsubscribe
+        </h3>
+        <p className="mt-1 text-[15px] leading-6 text-slate-700">
+          For replies and unsubscribe requests that arrive after the day&apos;s drafts are gone. Paste the addresses, or the whole email from Gmail.
+        </p>
+        <form
+          className="mt-3 grid gap-3"
+          onSubmit={(event) => void handleRecordOutcomes(event)}
+        >
+          <label className="flex flex-col gap-1.5 text-[15px] font-medium text-slate-800">
+            Email addresses
+            <textarea
+              className="min-h-24 rounded-xl border border-slate-300 bg-white px-3 py-2 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+              onChange={(event) => setOutcomeInput(event.target.value)}
+              placeholder={"One address per line, or paste the email.\nExample: agent@brokerage.com"}
+              value={outcomeInput}
+            />
+          </label>
+          <p className="text-sm leading-6 text-slate-600">
+            {parsedOutcomeEmails.length === 0
+              ? "No addresses found yet. Your own address is ignored."
+              : `${parsedOutcomeEmails.length} address${parsedOutcomeEmails.length === 1 ? "" : "es"} found. You will see the full list before anything is recorded.`}
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-1.5 text-[15px] font-medium text-slate-800">
+              What happened
+              <select
+                className="h-10 rounded-xl border border-slate-300 bg-white px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                onChange={(event) => setOutcomeKind(event.target.value as ContactOutcome)}
+                value={outcomeKind}
+              >
+                {contactOutcomes.map((outcome) => (
+                  <option key={outcome} value={outcome}>
+                    {contactOutcomeLabels[outcome]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5 text-[15px] font-medium text-slate-800">
+              Note (optional)
+              <input
+                className="h-10 rounded-xl border border-slate-300 bg-white px-3 font-normal outline-none transition focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                maxLength={maxOutcomeNoteLength}
+                onChange={(event) => setOutcomeNote(event.target.value)}
+                placeholder="e.g. Interested, wants pricing"
+                value={outcomeNote}
+              />
+            </label>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm leading-6 text-slate-600">
+              Each address is permanently stopped in PipelineCue. Sent history is kept. It does not update HubSpot.
+            </p>
+            <button
+              className="h-10 shrink-0 whitespace-nowrap rounded-lg bg-[#071b33] px-4 text-[15px] font-semibold text-white shadow-sm transition hover:bg-[#0b2a52] focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400"
+              disabled={isRecordingOutcome || parsedOutcomeEmails.length === 0}
+              type="submit"
+            >
+              {isRecordingOutcome ? "Recording..." : "Record"}
+            </button>
+          </div>
+          {outcomeResults.length > 0 && (
+            <ul className="grid gap-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">
+              {outcomeResults.map((row) => (
+                <li className="flex flex-wrap justify-between gap-2" key={row.email}>
+                  <span className="break-all font-medium text-slate-900">{row.email}</span>
+                  <span>
+                    {row.result === "recorded"
+                      ? "Stopped"
+                      : row.result === "already_recorded"
+                        ? "Already recorded"
+                        : "Not found in PipelineCue"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </form>
+      </section>
+
+      {resultsSummary && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-950">
+                Stopped contacts
+              </h3>
+              <p className="mt-1 text-[15px] leading-6 text-slate-700">
+                Agents who will not get another PipelineCue email, and why.
+              </p>
+            </div>
+            <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
+              Show
+              <select
+                className="h-9 rounded-lg border border-slate-300 bg-white px-2 font-normal outline-none focus:border-cyan-600 focus:ring-2 focus:ring-cyan-100"
+                onChange={(event) => {
+                  setStoppedFilter(event.target.value as StoppedOutcome | "all");
+                  setShowAllStopped(false);
+                }}
+                value={stoppedFilter}
+              >
+                <option value="all">
+                  All ({resultsSummary.stopped_contacts.length})
+                </option>
+                {(Object.keys(stoppedOutcomeLabels) as StoppedOutcome[]).map((outcome) => (
+                  <option key={outcome} value={outcome}>
+                    {stoppedOutcomeLabels[outcome]} ({getOutcomeCount(resultsSummary, outcome)})
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {visibleStoppedContacts.length === 0 ? (
+            <p className="mt-4 text-[15px] text-slate-600">No stopped contacts yet.</p>
+          ) : (
+            <ul className="mt-4 grid gap-2">
+              {visibleStoppedContacts.map((contact) => (
+                <li
+                  className="flex flex-col gap-1 rounded-xl border border-slate-200 p-3 sm:flex-row sm:items-start sm:justify-between"
+                  key={`${contact.contact_id}-${contact.outcome}`}
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-950">
+                      {contact.name || contact.email || "Unknown contact"}
+                    </p>
+                    {contact.name && contact.email && (
+                      <p className="break-all text-sm text-slate-600">{contact.email}</p>
+                    )}
+                    {contact.reason && (
+                      <p className="mt-1 text-sm leading-5 text-slate-700">{contact.reason}</p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2 sm:flex-col sm:items-end">
+                    <span
+                      className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${stoppedOutcomeClasses[contact.outcome] ?? stoppedOutcomeClasses.do_not_contact}`}
+                    >
+                      {stoppedOutcomeLabels[contact.outcome] ?? contact.outcome}
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      {formatDate(contact.recorded_at)}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {stoppedContacts.length > stoppedListPreviewSize && (
+            <button
+              className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:border-cyan-500 hover:text-cyan-800"
+              onClick={() => setShowAllStopped((current) => !current)}
+              type="button"
+            >
+              {showAllStopped
+                ? "Show fewer"
+                : `Show all ${stoppedContacts.length}`}
+            </button>
+          )}
+        </section>
+      )}
+    </div>
   );
 }

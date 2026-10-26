@@ -48,15 +48,23 @@ const emailPattern = /[a-z0-9._%+'-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 /**
  * Extracts unique, lower-cased addresses from pasted text. Accepts one address
  * per line, comma- or space-separated lists, or whole bounce notices copied
- * from Gmail. Mail-system addresses and any address on an excluded domain
- * (normally the sender's own domain) are left out.
+ * from Gmail. Mail-system addresses are left out, as are excluded addresses
+ * (normally the owner's own address, which appears in every pasted notice).
+ *
+ * Prefer excluding exact addresses. A whole domain is only safe to exclude
+ * when it is a private company domain: excluding a shared domain such as
+ * gmail.com would silently drop real contacts, including unsubscribes.
  */
 export function parseBounceEmailInput(
   input: string,
   excludedDomains: string[] = [],
+  excludedAddresses: string[] = [],
 ) {
   const excluded = new Set(
     excludedDomains.map((domain) => domain.trim().toLowerCase()).filter(Boolean),
+  );
+  const excludedExact = new Set(
+    excludedAddresses.map((address) => address.trim().toLowerCase()).filter(Boolean),
   );
   const found = new Set<string>();
 
@@ -66,6 +74,7 @@ export function parseBounceEmailInput(
     if (!localPart || !domain) continue;
     if (systemLocalParts.has(localPart)) continue;
     if (excluded.has(domain)) continue;
+    if (excludedExact.has(email)) continue;
     found.add(email);
   }
 
