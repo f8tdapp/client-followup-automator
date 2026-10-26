@@ -6632,16 +6632,20 @@ function ResultsView({
       </section>
 
       {resultsSummary && (
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h3 className="text-lg font-semibold text-slate-950">
-                Stopped contacts
-              </h3>
-              <p className="mt-1 text-[15px] leading-6 text-slate-700">
+        <details className="group rounded-2xl border border-slate-200 bg-white shadow-[0_12px_36px_rgba(15,23,42,0.08)]">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 rounded-2xl p-5 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-cyan-500">
+            <span>
+              <span className="block text-lg font-semibold text-slate-950">
+                Stopped contacts ({resultsSummary.stopped_contacts.length})
+              </span>
+              <span className="mt-1 block text-[15px] leading-6 text-slate-700">
                 Agents who will not get another PipelineCue email, and why.
-              </p>
-            </div>
+              </span>
+            </span>
+            <span aria-hidden="true" className="text-cyan-700 transition group-open:rotate-180">v</span>
+          </summary>
+          <div className="border-t border-slate-100 p-5">
+          <div className="flex justify-end">
             <label className="flex flex-col gap-1.5 text-sm font-medium text-slate-700">
               Show
               <select
@@ -6708,7 +6712,8 @@ function ResultsView({
                 : `Show all ${stoppedContacts.length}`}
             </button>
           )}
-        </section>
+          </div>
+        </details>
       )}
     </div>
   );
