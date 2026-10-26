@@ -12,7 +12,7 @@ import {
   updateDraft,
 } from "@/lib/email-drafts";
 import { authorizeOwner } from "@/lib/authorization";
-import { getEmailDomain } from "@/lib/results-summary";
+import { normalizeOwnerEmail } from "@/lib/results-summary";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -61,7 +61,7 @@ export async function GET() {
 
     return Response.json({
       ...(await listTodayDrafts()),
-      ownerDomain: getEmailDomain(authorization.user.email),
+      ownerEmail: normalizeOwnerEmail(authorization.user.email),
     });
   } catch (draftError) {
     return handleDraftError(draftError, "list_today_drafts");
@@ -121,7 +121,7 @@ export async function POST(request: Request) {
 
     return Response.json({
       ...result,
-      ownerDomain: getEmailDomain(authorization.user.email),
+      ownerEmail: normalizeOwnerEmail(authorization.user.email),
     });
   } catch (draftError) {
     return handleDraftError(draftError, routeBranch);

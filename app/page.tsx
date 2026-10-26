@@ -295,7 +295,7 @@ type EmailDraftResponse = {
   error?: string;
   details?: string;
   bounceResults?: BounceRecordResult[];
-  ownerDomain?: string | null;
+  ownerEmail?: string | null;
 };
 
 type SendingSettings = {
@@ -1168,9 +1168,10 @@ export default function Dashboard() {
   const [bounceKind, setBounceKind] = useState<BounceKind>("address_not_found");
   const [isRecordingBounces, setIsRecordingBounces] = useState(false);
   const [bounceResults, setBounceResults] = useState<BounceRecordResult[]>([]);
-  // The signed-in owner's own email domain appears in pasted bounce notices;
-  // it is never treated as a bounced contact. The server excludes it too.
-  const [ownSendingDomains, setOwnSendingDomains] = useState<string[]>([]);
+  // The signed-in owner's own address appears in pasted bounce notices; it is
+  // never treated as a bounced contact. Only that exact address is excluded,
+  // never its whole domain. The server excludes it too.
+  const [ownEmailAddresses, setOwnEmailAddresses] = useState<string[]>([]);
   const [showAllScheduledContacts, setShowAllScheduledContacts] =
     useState(false);
   const [showSendPlanDetails, setShowSendPlanDetails] = useState(false);
@@ -1693,8 +1694,8 @@ export default function Dashboard() {
   function applyEmailDraftResponse(body: EmailDraftResponse) {
     setDailyDrafts(body.drafts ?? []);
     setEmailDraftSummary(body.summary ?? emptyEmailDraftSummary);
-    if (body.ownerDomain) {
-      setOwnSendingDomains([body.ownerDomain]);
+    if (body.ownerEmail) {
+      setOwnEmailAddresses([body.ownerEmail]);
     }
   }
 
@@ -2165,8 +2166,8 @@ export default function Dashboard() {
 
             setDailyDrafts(draftsBody.drafts ?? []);
             setEmailDraftSummary(draftsBody.summary ?? emptyEmailDraftSummary);
-            if (draftsBody.ownerDomain) {
-              setOwnSendingDomains([draftsBody.ownerDomain]);
+            if (draftsBody.ownerEmail) {
+              setOwnEmailAddresses([draftsBody.ownerEmail]);
             }
           }
 
@@ -2904,7 +2905,7 @@ export default function Dashboard() {
   async function handleRecordBounces(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const emails = parseBounceEmailInput(bounceInput, ownSendingDomains);
+    const emails = parseBounceEmailInput(bounceInput, [], ownEmailAddresses);
 
     if (emails.length === 0) {
       setError("Paste at least one bounced email address.");
@@ -3417,7 +3418,8 @@ export default function Dashboard() {
               {(() => {
                 const parsedCount = parseBounceEmailInput(
                   bounceInput,
-                  ownSendingDomains,
+                  [],
+                  ownEmailAddresses,
                 ).length;
                 return parsedCount === 0
                   ? "No addresses found yet. Your own sending address is ignored."
@@ -6239,7 +6241,7 @@ type ResultsResponse = {
   ok?: boolean;
   error?: string;
   summary?: ResultsSummary;
-  ownerDomain?: string | null;
+  ownerEmail?: string | null;
   outcomeResults?: OutcomeRecordResult[];
   message?: string;
 };
@@ -6259,7 +6261,7 @@ function ResultsView({
   fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }) {
   const [resultsSummary, setResultsSummary] = useState<ResultsSummary | null>(null);
-  const [resultsOwnerDomain, setResultsOwnerDomain] = useState<string | null>(null);
+  const [resultsOwnerEmail, setResultsOwnerEmail] = useState<string | null>(null);
   const [isLoadingResults, setIsLoadingResults] = useState(true);
   const [resultsError, setResultsError] = useState("");
   const [resultsMessage, setResultsMessage] = useState("");
@@ -6286,7 +6288,7 @@ function ResultsView({
 
         if (!isActive()) return;
         setResultsSummary(body.summary);
-        setResultsOwnerDomain(body.ownerDomain ?? null);
+        setResultsOwnerEmail(body.ownerEmail ?? null);
       } catch (loadError) {
         if (!isActive()) return;
         setResultsError(getErrorMessage(loadError, "Unable to load results."));
@@ -6311,9 +6313,10 @@ function ResultsView({
     () =>
       parseBounceEmailInput(
         outcomeInput,
-        resultsOwnerDomain ? [resultsOwnerDomain] : [],
+        [],
+        resultsOwnerEmail ? [resultsOwnerEmail] : [],
       ),
-    [outcomeInput, resultsOwnerDomain],
+    [outcomeInput, resultsOwnerEmail],
   );
 
   async function handleRecordOutcomes(event: FormEvent<HTMLFormElement>) {

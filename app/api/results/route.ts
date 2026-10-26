@@ -4,7 +4,7 @@ import {
   recordContactOutcomes,
   ResultsOperationError,
 } from "@/lib/results";
-import { getEmailDomain } from "@/lib/results-summary";
+import { normalizeOwnerEmail } from "@/lib/results-summary";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -17,7 +17,7 @@ export async function GET() {
     return Response.json({
       ok: true,
       summary: await getResultsSummary(),
-      ownerDomain: getEmailDomain(authorization.user.email),
+      ownerEmail: normalizeOwnerEmail(authorization.user.email),
     });
   } catch (resultsError) {
     return handleResultsError(resultsError);

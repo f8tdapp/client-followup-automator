@@ -101,9 +101,12 @@ export function getOutcomeCount(
   return summary.outcome_counts[outcome] ?? 0;
 }
 
-export function getEmailDomain(email: string | null | undefined) {
-  const domain = email?.trim().toLowerCase().split("@")[1];
-  return domain && domain.includes(".") ? domain : null;
+// The signed-in owner's own address, normalized. Pasted bounce notices and
+// replies contain it, so it is never recorded as a contact outcome. Only this
+// exact address is excluded, never its whole domain (see parseBounceEmailInput).
+export function normalizeOwnerEmail(email: string | null | undefined) {
+  const normalized = email?.trim().toLowerCase() ?? "";
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized) ? normalized : null;
 }
 
 export function summarizeOutcomeResults(

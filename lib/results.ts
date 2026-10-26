@@ -3,7 +3,7 @@ import { parseBounceEmailInput } from "@/lib/bounce-recording";
 import {
   type OutcomeRecordResult,
   type ResultsSummary,
-  getEmailDomain,
+  normalizeOwnerEmail,
   isContactOutcome,
   maxOutcomeEmailsPerRequest,
   maxOutcomeNoteLength,
@@ -51,13 +51,14 @@ export async function recordContactOutcomes({
   note: unknown;
   actorEmail: string;
 }) {
-  const ownerDomain = getEmailDomain(actorEmail);
+  const ownerEmail = normalizeOwnerEmail(actorEmail);
   const requestedEmails = Array.isArray(emails)
     ? parseBounceEmailInput(
         emails
           .filter((value): value is string => typeof value === "string")
           .join("\n"),
-        ownerDomain ? [ownerDomain] : [],
+        [],
+        ownerEmail ? [ownerEmail] : [],
       )
     : [];
 
